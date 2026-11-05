@@ -14,6 +14,15 @@ use common::*;
 const MIB: usize = 1 << 20;
 const ETAG: &str = "\"v1\"";
 
+/// One test at a time: these tests check that measured gains add connections, and concurrent
+/// throttled downloads on a small CI runner leave no CPU to measure them with.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
@@ -47,6 +56,7 @@ fn json_events(out: &Output) -> Vec<serde_json::Value> {
 
 #[test]
 fn throttled_connections_are_added_and_the_file_matches() {
+    let _serial = serial();
     let body = payload(16 * MIB);
     let server = per_connection(&body, 2 * MIB as u64);
     let dir = tempdir();
@@ -99,6 +109,7 @@ fn throttled_connections_are_added_and_the_file_matches() {
 
 #[test]
 fn max_connections_one_keeps_a_single_stream() {
+    let _serial = serial();
     let body = payload(6 * MIB);
     let server = per_connection(&body, 4 * MIB as u64);
     let dir = tempdir();
@@ -116,6 +127,7 @@ fn max_connections_one_keeps_a_single_stream() {
 
 #[test]
 fn a_server_that_ignores_ranges_is_served_by_one_stream() {
+    let _serial = serial();
     let body = payload(12 * MIB);
     let served = body.clone();
     // Claims range support but always sends everything.
@@ -145,6 +157,7 @@ fn a_server_that_ignores_ranges_is_served_by_one_stream() {
 
 #[test]
 fn without_a_validator_no_range_is_requested() {
+    let _serial = serial();
     let body = payload(8 * MIB);
     let served = body.clone();
     let server = Server::start(move |req| Reply::ranged(&served, req).rate(4 * MIB as u64));
@@ -160,6 +173,7 @@ fn without_a_validator_no_range_is_requested() {
 
 #[test]
 fn a_checksum_allows_segments_without_a_validator() {
+    let _serial = serial();
     let body = payload(10 * MIB);
     let served = body.clone();
     let server = Server::start(move |req| Reply::ranged(&served, req).rate(2 * MIB as u64));
@@ -180,6 +194,7 @@ fn a_checksum_allows_segments_without_a_validator() {
 
 #[test]
 fn a_changed_source_seen_by_a_helper_is_a_conflict_that_keeps_data() {
+    let _serial = serial();
     let body = payload(12 * MIB);
     let served = body.clone();
     let server = Server::start(move |req| match req.range() {
@@ -208,6 +223,7 @@ fn a_changed_source_seen_by_a_helper_is_a_conflict_that_keeps_data() {
 
 #[test]
 fn busy_or_refusing_helpers_leave_the_lead_to_finish() {
+    let _serial = serial();
     for (status, extra) in [(503, Some(("Retry-After", "1"))), (403, None)] {
         let body = payload(12 * MIB);
         let served = body.clone();
@@ -244,6 +260,7 @@ fn busy_or_refusing_helpers_leave_the_lead_to_finish() {
 
 #[test]
 fn the_rate_limit_applies_to_all_connections_together() {
+    let _serial = serial();
     let body = payload(6 * MIB);
     let server = per_connection(&body, MIB as u64);
     let dir = tempdir();
@@ -292,6 +309,7 @@ fn saved_ranges(state: &Path) -> Option<Vec<(u64, u64)>> {
 
 #[test]
 fn kill_9_during_a_segmented_download_resumes_every_gap() {
+    let _serial = serial();
     let body = payload(24 * MIB);
     let (server, slow) = throttled_until_released(&body);
     let dir = tempdir();
@@ -348,6 +366,7 @@ fn kill_9_during_a_segmented_download_resumes_every_gap() {
 
 #[test]
 fn sigint_during_a_segmented_download_saves_every_connection() {
+    let _serial = serial();
     let body = payload(24 * MIB);
     let (server, slow) = throttled_until_released(&body);
     let dir = tempdir();
