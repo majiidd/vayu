@@ -1,0 +1,191 @@
+name: Release
+
+# A `v*` tag builds, tests, and packages every target and opens a *draft* GitHub release with the
+# archives, SHA256SUMS, the installer, and a Homebrew formula. A maintainer publishes the draft
+# after the checks in docs/RELEASING.md; publishing updates the Homebrew tap (homebrew.yml). Tags with a hyphen (v0.2.0-rc.1) become prereleases.
+# Running the workflow by hand builds and uploads everything as workflow artifacts only.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Includes the recovery (tests/recovery.rs) and terminal (tests/terminal.rs) gates.
+      - run: cargo test --locked
+
+  audit:
+    name: licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  benchmark:
+    name: loopback benchmark
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked
+      # An explicit bash shell adds pipefail, so failures are not hidden by `tee`.
+      - shell: bash
+        run: bench/scenarios.sh 3 | tee bench.txt
+      # Fails when any run failed or produced a different file.
+      - shell: bash
+        run: bench/summarize.py bench.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: bench.txt
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: [test, audit]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          # The oldest available runners keep the glibc requirement low; musl builds have none.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            macos: "11.0"
+          # 10.14 is the first release with SecTrustEvaluateWithError, used to verify certificates.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            macos: "10.14"
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Check linkage
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/vayu
+          file "$bin"
+          case ${{ matrix.target }} in
+            *-musl)
+              if ldd "$bin" 2>&1 | grep -q '=>'; then ldd "$bin"; exit 1; fi ;;
+            *-gnu)
+              echo "Requires glibc $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)" ;;
+            *-darwin)
+              otool -l "$bin" | grep -A3 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' | grep -E 'minos|version'
+              otool -L "$bin"
+              # Apple Silicon runs only signed code; the linker's ad-hoc signature is enough
+              # for Homebrew and command-line downloads, which are not quarantined.
+              codesign --verify --verbose "$bin" ;;
+          esac
+          "$bin" --version | grep -q '(vayu-download)'
+
+      - name: Smoke test on Linux distributions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bin=$PWD/target/${{ matrix.target }}/release/vayu
+          case ${{ matrix.target }} in
+            *-musl) images="alpine:latest debian:oldstable-slim debian:stable-slim fedora:latest" ;;
+            *-gnu) images="ubuntu:22.04 debian:stable-slim fedora:latest" ;;
+          esac
+          for image in $images; do
+            docker run --rm -v "$bin:/usr/local/bin/vayu:ro" "$image" vayu --version
+          done
+
+      - run: scripts/package.sh ${{ matrix.target }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vayu-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vayu-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums, installer, and Homebrew formula
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            # v0.2.0 and v0.2.0-rc.1 both release Cargo.toml version 0.2.0 (or 0.2.0-rc.1).
+            if [[ ${GITHUB_REF_NAME#v} != "$version"* ]]; then
+              echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+              exit 1
+            fi
+            version=${GITHUB_REF_NAME#v}
+          fi
+          cd dist
+          cat ./*.tar.gz.sha256 > SHA256SUMS
+          rm ./*.tar.gz.sha256
+          sha256sum -c SHA256SUMS
+          cp ../scripts/install.sh install.sh
+          ../scripts/homebrew.sh "$version" "$GITHUB_REPOSITORY" SHA256SUMS > vayu.rb
+
+      - name: Test the installer against these archives
+        run: |
+          (cd dist && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          docker run --rm --network host -e VAYU_BASE_URL=http://127.0.0.1:8765 \
+            -v "$PWD/dist/install.sh:/install.sh:ro" alpine:latest \
+            sh -c 'sh /install.sh && ~/.local/bin/vayu --version'
+
+      - uses: actions/attest-build-provenance@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-path: dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/*
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+          prerelease=
+          [[ $GITHUB_REF_NAME == *-* ]] && prerelease=--prerelease
+          gh release create "$GITHUB_REF_NAME" --draft $prerelease \
+            --title "Vayu ${GITHUB_REF_NAME#v}" --notes-file notes.md dist/*
