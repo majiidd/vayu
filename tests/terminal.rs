@@ -37,7 +37,7 @@ impl Pty {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                &raw mut size,
             )
         };
         assert_eq!(ok, 0, "openpty: {}", std::io::Error::last_os_error());
@@ -106,6 +106,8 @@ struct Run {
     /// Asks the reader to close the master, which hangs up the terminal.
     hangup: Arc<AtomicBool>,
     output: Arc<Mutex<Vec<u8>>>,
+    /// When each read arrived, and the output length after it.
+    reads: Arc<Mutex<Vec<(Instant, usize)>>>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -154,7 +156,8 @@ impl Run {
         let raw = master.as_raw_fd();
         let hangup: Arc<AtomicBool> = Arc::default();
         let output: Arc<Mutex<Vec<u8>>> = Arc::default();
-        let (sink, closing) = (output.clone(), hangup.clone());
+        let reads: Arc<Mutex<Vec<(Instant, usize)>>> = Arc::default();
+        let (sink, log, closing) = (output.clone(), reads.clone(), hangup.clone());
         // Drain continuously (a full terminal buffer would block the presenter) until EOF, EIO
         // once every slave descriptor is closed (Linux), or a hang-up request. This thread
         // holds the only master descriptor, so dropping it really closes the terminal.
@@ -171,7 +174,11 @@ impl Run {
                     continue;
                 }
                 match master.read(&mut buf) {
-                    Ok(n @ 1..) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
+                    Ok(n @ 1..) => {
+                        let mut out = sink.lock().unwrap();
+                        out.extend_from_slice(&buf[..n]);
+                        log.lock().unwrap().push((Instant::now(), out.len()));
+                    }
                     _ => break,
                 }
             }
@@ -181,6 +188,7 @@ impl Run {
             master: raw,
             hangup,
             output,
+            reads,
             reader: Some(reader),
         }
     }
@@ -450,16 +458,65 @@ fn resize_switches_layout_mid_download() {
     assert_eq!(std::fs::read(dir.path().join("file.bin")).unwrap(), body);
 }
 
+/// The shortest time between two in-place redraws during a download over about `secs` seconds.
+fn shortest_redraw_gap(env: &[(&str, &str)], len: usize, secs: f64) -> Duration {
+    let body = payload(len);
+    let server = slow_server(&body, (len as f64 / secs) as u64);
+    let dir = tempfile::tempdir().unwrap();
+    let url = server.url("/file.bin");
+    let run = Run::start(
+        dir.path(),
+        Pty::open(100, 30),
+        Session::Plain,
+        &[&url, "--max-connections", "1"],
+        env,
+    );
+    let reads = run.reads.clone();
+    let (status, out) = run.finish();
+    assert!(status.success(), "{status:?}: {out:?}");
+    let reads = reads.lock().unwrap();
+    // A redraw starts with a cursor-up sequence; time it by the read that delivered it.
+    let bytes = out.as_bytes();
+    let mut times = Vec::new();
+    for at in 0..bytes.len() {
+        if bytes[at] == 0x1b
+            && out[at..].starts_with("\x1b[")
+            && sequences(&out[at..])
+                .first()
+                .is_some_and(|s| s.ends_with('A'))
+        {
+            let read = reads.iter().find(|(_, end)| *end > at).unwrap();
+            times.push(read.0);
+        }
+    }
+    assert!(
+        times.len() >= 4,
+        "too few redraws to measure: {}",
+        times.len()
+    );
+    times
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| !gap.is_zero())
+        .min()
+        .unwrap()
+}
+
 #[test]
 fn ssh_sessions_redraw_less_often() {
+    // Timers can only delay frames, so the shortest gap shows the cap even on a slow machine.
+    let local = shortest_redraw_gap(XTERM, 4096 * KIB, 3.0);
     let ssh_env = [XTERM, &[("SSH_CONNECTION", "10.0.0.2 52000 10.0.0.1 22")]].concat();
-    // Progress moves often enough that every frame differs: frames are drawn only on change.
-    let (_, local) = download(100, 30, XTERM, &[], 4096 * KIB, 4.0);
-    let (_, ssh) = download(100, 30, &ssh_env, &[], 4096 * KIB, 4.0);
-    let (local, ssh) = (redraws(&local), redraws(&ssh));
-    // At most 8 frames a second locally and 2 over SSH, over about four seconds.
-    assert!(local >= 20, "local redraws: {local}");
-    assert!(ssh <= 11 && ssh * 2 < local, "ssh {ssh} vs local {local}");
+    let ssh = shortest_redraw_gap(&ssh_env, 4096 * KIB, 3.0);
+    // At most 8 frames a second locally (125 ms apart) and 2 over SSH (500 ms apart).
+    assert!(
+        local < Duration::from_millis(300),
+        "local frames {local:?} apart"
+    );
+    assert!(
+        ssh >= Duration::from_millis(400),
+        "ssh frames {ssh:?} apart"
+    );
 }
 
 #[test]
