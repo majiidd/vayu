@@ -1,6 +1,10 @@
 # Releasing
 
 Releases are built by [`release.yml`](../.github/workflows/release.yml) from a version tag.
+Its build, check, package, and asset steps are `Makefile` targets, so they can be rerun
+locally: for example `make release package TARGET=aarch64-apple-darwin`, or
+`make check-tag TAG=v0.2.0-rc.1`. `make smoke` and `make test-installer` need Docker.
+Attestation, uploads, and creating the release stay in the workflow.
 
 1. **The workflow:** for each tag it
    - runs the full test matrix and cargo-deny, then builds and packages all six targets;
@@ -61,10 +65,10 @@ notes or the pull request.
 2. **Platforms:** every build job passed its linkage check and distribution smoke tests. The
    publish job installed the musl archive with `install.sh` under BusyBox `sh`.
 3. **Benchmarks reproduce:**
-   - Download the `benchmark` artifact, or run `bench/scenarios.sh 3 | tee bench.txt` on a
-     quiet machine.
-   - Summarize it with `bench/summarize.py bench.txt`. The summary must report no
-     `PROBLEM` lines, so every run produced the correct file.
+   - Download the `benchmark` artifact, or run `make bench` on a quiet machine.
+   - Summarize the artifact with `make bench-summary BENCH_OUT=bench.txt`; `make bench`
+     prints the summary itself. It must report no `PROBLEM` lines, so every run produced the
+     correct file.
    - Compare it with [BENCHMARKS.md](BENCHMARKS.md). The pattern must hold:
      - vayu clearly beats vayu-1 in the per-connection scenarios;
      - it stays within noise of vayu-1 in the shared and no-ranges scenarios;
@@ -92,6 +96,6 @@ If a gate fails, fix it on `main` and tag the next candidate (`-rc.2`).
 2. **Publish the draft:** check the draft's notes, then publish it.
 3. **Homebrew:** confirm that the Homebrew workflow passed and that
    `brew install majiidd/vayu/vayu` installs the new version.
-4. **crates.io:** run `cargo publish --locked` from the tagged commit. The crate is
+4. **crates.io:** run `make publish-crate` from the tagged commit. The crate is
    `vayu-download`; the executable is still `vayu`.
 5. **Next cycle:** add a fresh `## Unreleased` heading to `CHANGELOG.md`.

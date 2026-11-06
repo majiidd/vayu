@@ -23,18 +23,21 @@ Security problems should not be reported in public issues; see [SECURITY.md](SEC
 
 ## Development setup
 
-`rust-toolchain.toml` pins the exact toolchain; rustup installs it on first use.
+`rust-toolchain.toml` pins the exact toolchain; rustup installs it on first use. The
+`Makefile` holds every task, for you and for CI; `make` alone lists them.
 
 ```sh
-cargo build
-cargo test                                   # unit and end-to-end tests
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo deny check                             # licenses and advisories (cargo install cargo-deny)
+make build
+make test                    # unit and end-to-end tests; TEST=name filters
+make test-parallel           # one end-to-end suite (also test-download, -recovery, -terminal)
+make fmt-check
+make clippy                  # warnings are errors
+make deny                    # licenses and advisories (cargo install cargo-deny)
+make check                   # all of the above
 ```
 
-CI runs the same commands on macOS (ARM64 and Intel) and Linux (x86-64 and ARM64). A pull
-request needs all of them to pass.
+CI runs `make fmt-check`, `make clippy`, and `make test` on macOS (ARM64 and Intel) and Linux
+(x86-64 and ARM64), and cargo-deny on Linux. A pull request needs all of them to pass.
 
 ## Tests
 
@@ -70,7 +73,7 @@ Rules for new tests:
 - `summarize.py` prints the median table.
 
 Changes to the scheduler or the controller should include before-and-after numbers from
-`bench/scenarios.sh 3`. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for what these numbers
+`make bench` (three rounds of every scenario). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for what these numbers
 can and cannot show.
 
 ## Compatibility promises

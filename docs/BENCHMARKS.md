@@ -25,10 +25,10 @@ They are not a claim about how fast vayu is on any real link.
 To reproduce:
 
 ```sh
-cargo build --release
-bench/scenarios.sh 3 | tee bench.txt  # every scenario, three rounds
-bench/summarize.py bench.txt          # the median table below; fails if any output differed
-bench/scenarios.sh 5 per-conn-2M      # one scenario, five rounds
+make bench                            # release build, every scenario three rounds into bench.txt,
+                                      # then the median table below; fails if any output differed
+make bench REPS=5 SCENARIOS=per-conn-2M  # one scenario, five rounds
+make bench-summary                    # the table again from bench.txt
 ```
 
 Every release candidate is checked against this table (see [RELEASING.md](RELEASING.md)).

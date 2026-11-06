@@ -1,3 +1,5 @@
 /target
 *.part
 *.vayu
+/dist
+/bench.txt

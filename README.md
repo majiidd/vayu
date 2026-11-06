@@ -367,10 +367,11 @@ Use `--ca-cert` for private or corporate certificate authorities.
 ## Development
 
 ```sh
-cargo test                 # unit and end-to-end tests (needs loopback networking and PTYs)
-cargo clippy --all-targets
-bench/scenarios.sh 3       # local benchmark scenarios (build with --release first)
-bench/compare.sh URL 5     # one URL against curl and aria2
+make                       # list every task
+make test                  # unit and end-to-end tests (needs loopback networking and PTYs)
+make lint                  # formatting and clippy, as CI runs them
+make bench                 # local benchmark scenarios, then their summary
+bench/compare.sh URL 5     # one URL against curl and aria2 (after make release)
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the test layout and the compatibility promises;

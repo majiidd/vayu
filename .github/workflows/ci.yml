@@ -19,10 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rust-toolchain.toml pins the exact tested toolchain.
-      - run: rustup show active-toolchain
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: make toolchain
+      - run: make fmt-check
+      - run: make clippy
+      - run: make test
 
   portable-linux:
     name: musl build (${{ matrix.target }})
@@ -35,31 +35,18 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
-      - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: make musl-deps
+      - run: make release
       - name: Verify the binary has no runtime library dependencies
-        run: |
-          bin=target/${{ matrix.target }}/release/vayu
-          file "$bin"
-          if ldd "$bin" 2>&1 | grep -q '=>'; then ldd "$bin"; exit 1; fi
+        run: make check-binary
       - name: Smoke test on musl and glibc distributions
-        run: |
-          bin=$PWD/target/${{ matrix.target }}/release/vayu
-          for image in alpine:latest debian:stable-slim fedora:latest; do
-            docker run --rm -v "$bin:/usr/local/bin/vayu:ro" "$image" vayu --version
-          done
+        run: make smoke IMAGES="alpine:latest debian:stable-slim fedora:latest"
       - name: Package, then install with the release installer under BusyBox sh
-        run: |
-          scripts/package.sh ${{ matrix.target }} dist
-          cat dist/*.sha256 > dist/SHA256SUMS
-          (cd dist && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
-          sleep 1
-          docker run --rm --network host -e VAYU_BASE_URL=http://127.0.0.1:8765 \
-            -v "$PWD/scripts/install.sh:/install.sh:ro" alpine:latest \
-            sh -c 'sh /install.sh && ~/.local/bin/vayu --version'
+        run: make package checksums test-installer
 
   audit:
     name: licenses and advisories
