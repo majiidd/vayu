@@ -218,6 +218,13 @@ saved data and tells you the next step, usually `--checksum` or `--restart`. Wit
 run, Vayu still restarts from zero on its own when the server ignores a range request, because
 then no data from an earlier run is at stake.
 
+Mirrors often hold their own copy of a file, with its own `ETag` and `Last-Modified`. When the
+server starts sending a copy during a transfer or a resume with other validators but the same size, Vayu downloads up to 8
+saved blocks again from it, spread over the saved data. If every block matches its
+saved hash, Vayu says so, binds the download to the new copy, and continues. If any block
+differs, the file changed, and Vayu stops as above. Extra connections that reach such a copy
+step back until the main connection has checked it.
+
 When a signed link expires, the server answers 403. Vayu keeps the data and prints the
 `--resume-from` command to use once you have a new link:
 

@@ -126,6 +126,15 @@ and `finalize-part-removed` let the tests abort at each step.
    always continued in segments, even with `--max-connections 1`, so only the gaps are
    requested. Complete progress goes straight to finalization.
 
+A response with other validators but the same size, as from a mirror with its own copy, is not
+a conflict by itself. The engine asks the writer for up to 8 complete saved blocks spread over
+the data, requests each again through the original URL with the new validator as `If-Range`,
+and compares hashes. Every sample must come back as `206` for exactly that block, under the new
+validators; anything else, such as a redirect back to the first copy, is retried without a
+verdict. If all hashes match, the new validators replace the old ones in memory, in the crew,
+and in a newly published state generation. A single mismatch is a conflict. Helpers that meet
+such a copy end as failed and leave the check to the lead.
+
 
 ## Segmented transfers
 

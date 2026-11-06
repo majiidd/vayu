@@ -90,6 +90,42 @@ impl Validators {
         differs(&self.etag, &other.etag)
             || differs(&self.strong_last_modified, &other.strong_last_modified)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.strong_last_modified.is_none()
+    }
+
+    /// Compare a later full response (`other`, `other_total` bytes) with this representation of
+    /// `total` bytes.
+    pub fn compare(
+        &self,
+        total: Option<u64>,
+        other: &Validators,
+        other_total: Option<u64>,
+    ) -> Comparison {
+        let length_differs = matches!((total, other_total), (Some(a), Some(b)) if a != b);
+        if self.conflicts_with(other) {
+            Comparison::Changed
+        } else if !self.is_empty() && other.is_empty() && (length_differs || other_total.is_none())
+        {
+            // Some hosts send an error page with `200 OK`. Without the file's validators and at
+            // another or unknown length, it says nothing about the file.
+            Comparison::Unrelated
+        } else if length_differs {
+            Comparison::Changed
+        } else {
+            Comparison::Same
+        }
+    }
+}
+
+/// How a later response relates to the representation being downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Comparison {
+    Same,
+    Changed,
+    /// Not a representation of the file at all, such as an error page.
+    Unrelated,
 }
 
 /// Extract a filename from `Content-Disposition`, preferring the RFC 6266 `filename*` form.
@@ -267,6 +303,26 @@ mod tests {
         let changed = Validators::from_headers(&headers(&[("etag", "\"def\"")]));
         assert!(v.conflicts_with(&changed));
         assert!(!v.conflicts_with(&Validators::default()));
+    }
+
+    #[test]
+    fn comparison_tells_an_error_page_from_a_new_version() {
+        let v = Validators::from_headers(&headers(&[("etag", "\"abc\"")]));
+        let none = Validators::default();
+        let other = Validators::from_headers(&headers(&[("etag", "\"def\"")]));
+        assert_eq!(v.compare(Some(100), &v, Some(100)), Comparison::Same);
+        assert_eq!(v.compare(Some(100), &none, Some(100)), Comparison::Same);
+        assert_eq!(v.compare(Some(100), &other, Some(100)), Comparison::Changed);
+        assert_eq!(v.compare(Some(100), &v, Some(11)), Comparison::Changed);
+        assert_eq!(v.compare(Some(100), &none, Some(11)), Comparison::Unrelated);
+        assert_eq!(v.compare(Some(100), &none, None), Comparison::Unrelated);
+        assert_eq!(v.compare(Some(100), &v, None), Comparison::Same);
+        // Without validators of its own, only the length tells the versions apart.
+        assert_eq!(
+            none.compare(Some(100), &none, Some(11)),
+            Comparison::Changed
+        );
+        assert_eq!(v.compare(None, &none, Some(11)), Comparison::Same);
     }
 
     #[test]

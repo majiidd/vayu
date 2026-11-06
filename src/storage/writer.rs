@@ -26,6 +26,7 @@ use super::ledger::Ledger;
 use crate::fault;
 use crate::metrics::Durable;
 use crate::state::{self, MAX_BLOCKS, State};
+use crate::transport::http::Validators;
 
 /// Chunks queued ahead of the disk. Network chunks are typically 8–64 KiB.
 const QUEUE_DEPTH: usize = 64;
@@ -43,6 +44,14 @@ enum Command {
     },
     Checkpoint(oneshot::Sender<()>),
     Reset(oneshot::Sender<()>),
+    Samples {
+        max: usize,
+        reply: oneshot::Sender<Vec<(u64, u64, String)>>,
+    },
+    Rebind {
+        validators: Validators,
+        reply: oneshot::Sender<()>,
+    },
     Finish {
         complete: bool,
         reply: oneshot::Sender<Finished>,
@@ -145,6 +154,30 @@ impl PartWriter {
     pub async fn reset(&mut self) -> io::Result<()> {
         let (reply, wait) = oneshot::channel();
         if self.handle.tx.send(Command::Reset(reply)).await.is_err() || wait.await.is_err() {
+            return Err(self.error().await);
+        }
+        Ok(())
+    }
+
+    /// Up to `max` complete saved blocks spread over the data, as `(start, end, SHA-256)`.
+    pub async fn samples(&mut self, max: usize) -> io::Result<Vec<(u64, u64, String)>> {
+        let (reply, wait) = oneshot::channel();
+        let command = Command::Samples { max, reply };
+        if self.handle.tx.send(command).await.is_err() {
+            return Err(self.error().await);
+        }
+        match wait.await {
+            Ok(samples) => Ok(samples),
+            Err(_) => Err(self.error().await),
+        }
+    }
+
+    /// Record that the saved data belongs to the representation `validators` names, and
+    /// publish it.
+    pub async fn rebind(&mut self, validators: Validators) -> io::Result<()> {
+        let (reply, wait) = oneshot::channel();
+        let command = Command::Rebind { validators, reply };
+        if self.handle.tx.send(command).await.is_err() || wait.await.is_err() {
             return Err(self.error().await);
         }
         Ok(())
@@ -297,6 +330,14 @@ fn run(
                 w.file.set_len(0)?;
                 let _ = reply.send(());
             }
+            Command::Samples { max, reply } => {
+                let _ = reply.send(w.ledger.samples(max));
+            }
+            Command::Rebind { validators, reply } => {
+                w.cp.state.validators = validators;
+                w.checkpoint()?;
+                let _ = reply.send(());
+            }
             Command::Finish { complete, reply } => {
                 if complete && w.cp.state.total.is_none() {
                     w.cp.state.total = Some(w.ledger.bytes());
@@ -320,7 +361,6 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::http::Validators;
     use sha2::{Digest, Sha256};
 
     fn setup(dir: &tempfile::TempDir, total: Option<u64>) -> (PartWriter, Arc<Durable>) {

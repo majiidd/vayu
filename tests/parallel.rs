@@ -241,7 +241,7 @@ fn a_checksum_allows_segments_without_a_validator() {
 }
 
 #[test]
-fn a_changed_source_seen_by_a_helper_is_a_conflict_that_keeps_data() {
+fn helpers_sent_another_copy_leave_the_lead_to_finish() {
     let _serial = serial();
     let body = payload(12 * MIB);
     let served = body.clone();
@@ -249,24 +249,48 @@ fn a_changed_source_seen_by_a_helper_is_a_conflict_that_keeps_data() {
         None => Reply::full(&served)
             .header("ETag", ETAG)
             .rate(2 * MIB as u64),
-        // A broken server ignores If-Range and serves another version.
-        Some(_) => Reply::ranged(&served, req).header("ETag", "\"v2\""),
+        // Another copy under its own ETag; it is never checked against saved blocks, so none of
+        // its bytes may be used.
+        Some(_) => Reply::ranged(&payload(12 * MIB + 1)[1..], req).header("ETag", "\"v2\""),
     });
     let dir = tempdir();
 
     let out = run(dir.path(), &[&server.url("/chg.bin")]);
-    assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("changed on the server"),
-        "{}",
-        stderr(&out)
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.path().join("chg.bin")).unwrap(), body);
+    let requests = server.requests();
+    assert!(requests.iter().any(|r| r.range().is_some()), "{requests:?}");
+}
+
+#[test]
+fn error_pages_sent_to_helpers_as_ok_do_not_end_the_download() {
+    let _serial = serial();
+    let body = payload(12 * MIB);
+    let served = body.clone();
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = refused.clone();
+    let server = Server::start(move |req| match req.range() {
+        // Some hosts turn requests away with `200 OK` and a short HTML page.
+        Some(_) if counter.fetch_add(1, Ordering::SeqCst) < 2 => {
+            Reply::full(b"Bad Request").header("Content-Type", "text/html")
+        }
+        _ => Reply::ranged(&served, req)
+            .header("ETag", ETAG)
+            .rate(2 * MIB as u64),
+    });
+    let dir = tempdir();
+
+    let out = run(
+        dir.path(),
+        &[&server.url("/page.bin"), "--min-connections", "3"],
     );
-    let names = files(dir.path());
-    assert!(names.contains(&"chg.bin.part".to_string()), "{names:?}");
-    assert!(names.contains(&"chg.bin.vayu".to_string()), "{names:?}");
-    let part = std::fs::read(dir.path().join("chg.bin.part")).unwrap();
-    assert!(!part.is_empty());
-    assert_eq!(part, body[..part.len()], "only data from the first version");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.path().join("page.bin")).unwrap(), body);
+    assert!(
+        refused.load(Ordering::SeqCst) >= 2,
+        "{:?}",
+        server.requests()
+    );
 }
 
 #[test]

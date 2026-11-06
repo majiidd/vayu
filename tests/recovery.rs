@@ -429,6 +429,104 @@ fn source_change_between_runs_is_a_conflict_that_keeps_data() {
     assert_eq!(saved_prefix(&dir.path().join("d.bin.vayu")), saved);
 }
 
+/// A first run that saves `saved` bytes of `body` under [`ETAG`], then a server that sends `copy`
+/// under another ETag, as a mirror with its own copy does.
+fn another_copy(body: &[u8], saved: usize, copy: Vec<u8>) -> Server {
+    let served = body.to_vec();
+    Server::start(move |req| match req.attempt {
+        1 => Reply::full(&served).header("ETag", ETAG).cut_after(saved),
+        _ => Reply::ranged(&copy, req).header("ETag", "\"mirror\""),
+    })
+}
+
+#[test]
+fn another_copy_of_the_same_file_is_verified_and_resumed() {
+    const MIB: usize = 1 << 20;
+    let body = payload(6 * MIB);
+    let server = another_copy(&body, 4 * MIB + 100, body.clone());
+    let dir = tempdir();
+    let url = server.url("/m.bin");
+    let saved = interrupted_run(dir.path(), &url);
+
+    let out = run(dir.path(), &[&url, "--max-connections", "1"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("another copy of the file"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(std::fs::read(dir.path().join("m.bin")).unwrap(), body);
+    let requests = server.requests();
+    // The If-Range miss, four saved blocks checked, then the rest under the new ETag.
+    let last = requests.last().unwrap();
+    assert_eq!(last.range_start(), Some(saved as usize), "{requests:?}");
+    assert_eq!(last.header("if-range"), Some("\"mirror\""));
+    assert_eq!(requests.len(), 7, "{requests:?}");
+}
+
+#[test]
+fn another_copy_with_other_bytes_at_the_same_size_is_a_change() {
+    const MIB: usize = 1 << 20;
+    let body = payload(6 * MIB);
+    let mut copy = body.clone();
+    // Inside the last saved block, which is always checked.
+    copy[3 * MIB + 5] ^= 1;
+    let server = another_copy(&body, 4 * MIB + 100, copy);
+    let dir = tempdir();
+    let url = server.url("/n.bin");
+    let saved = interrupted_run(dir.path(), &url);
+
+    let out = run(dir.path(), &[&url, "--max-connections", "1"], &[]);
+    assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
+    assert!(stderr(&out).contains("changed on the server"));
+    assert_eq!(saved_prefix(&dir.path().join("n.bin.vayu")), saved);
+}
+
+#[test]
+fn an_error_page_sent_as_ok_is_retried_not_taken_for_a_new_version() {
+    let body = payload(SIZE);
+    let served = body.clone();
+    let server = Server::start(move |req| match req.attempt {
+        1 => Reply::full(&served)
+            .header("ETag", ETAG)
+            .cut_after(SIZE / 2),
+        // Some hosts refuse a request with `200 OK` and a short HTML page.
+        2 => Reply::full(b"Bad Request").header("Content-Type", "text/html"),
+        _ => Reply::ranged(&served, req).header("ETag", ETAG),
+    });
+    let dir = tempdir();
+    let url = server.url("/e.bin");
+    let saved = interrupted_run(dir.path(), &url);
+
+    let out = run(dir.path(), &[&url], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.path().join("e.bin")).unwrap(), body);
+    let resumed = server.requests()[2].range_start();
+    assert_eq!(resumed, Some(saved as usize), "{:?}", server.requests());
+}
+
+#[test]
+fn an_expired_link_answering_with_error_pages_gives_up_and_keeps_data() {
+    let body = payload(SIZE);
+    let served = body.clone();
+    let server = Server::start(move |req| match req.attempt {
+        1 => Reply::full(&served)
+            .header("ETag", ETAG)
+            .cut_after(SIZE / 2),
+        _ => Reply::full(b"Bad Request").header("Content-Type", "text/html"),
+    });
+    let dir = tempdir();
+    let url = server.url("/x.bin");
+    let saved = interrupted_run(dir.path(), &url);
+
+    let out = run(dir.path(), &[&url, "--retry", "2"], &[]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("not the file"), "{err}");
+    assert!(!err.contains("changed on the server"), "{err}");
+    assert_eq!(saved_prefix(&dir.path().join("x.bin.vayu")), saved);
+}
+
 #[test]
 fn server_ignoring_ranges_on_rerun_keeps_saved_progress() {
     let body = payload(SIZE);

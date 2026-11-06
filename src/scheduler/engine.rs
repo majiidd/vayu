@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Response, Version};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use url::Url;
 
@@ -32,13 +33,16 @@ use super::{Stop, StopReason};
 use crate::cli::Settings;
 use crate::error::{Category, Failure, describe_io};
 use crate::integrity::Checksum;
+use crate::integrity::hex;
 use crate::metrics::{Event, Phase, Reporter};
 use crate::presentation::Completion;
 use crate::presentation::text::redact_url;
 use crate::recovery::{self, Found, Recovered};
 use crate::state::State;
 use crate::storage::{self, Checkpoints, Destination, Ledger, PartWriter};
-use crate::transport::http::{Validators, content_disposition_filename, parse_content_range};
+use crate::transport::http::{
+    Comparison, Validators, content_disposition_filename, parse_content_range,
+};
 use crate::transport::{AttemptError, RangeRequest, Transport, classify_error, classify_status};
 
 /// Segment only files of at least this many checkpoint blocks: smaller ones finish before an
@@ -46,6 +50,8 @@ use crate::transport::{AttemptError, RangeRequest, Transport, classify_error, cl
 const MIN_SEGMENTED_BLOCKS: u64 = 4;
 /// The lead splits another segment only when its owner has at least this much work left.
 const LEAD_STEAL_SECS: f64 = 2.0;
+/// Saved blocks downloaded again to check that another copy of the file has the same bytes.
+const COPY_SAMPLES: usize = 8;
 
 /// What the first response revealed about the remote representation.
 struct Resource {
@@ -91,6 +97,8 @@ enum Accepted {
     Stream,
     Recovered,
     Published,
+    /// The transfer now continues from another copy of the file; request again.
+    Rebound,
 }
 
 pub struct Engine<'a> {
@@ -650,6 +658,10 @@ impl<'a> Engine<'a> {
                 self.stream(response, start).await
             }
             Ok(Accepted::Recovered) => AttemptEnd::Again,
+            Ok(Accepted::Rebound) => {
+                self.release_segment();
+                AttemptEnd::Again
+            }
             Ok(Accepted::Published) => AttemptEnd::Complete,
         }
     }
@@ -688,17 +700,24 @@ impl<'a> Engine<'a> {
                     let Some(resource) = self.resource.as_ref() else {
                         return self.begin(final_url, response, range.total, validators);
                     };
-                    let total_changed = matches!(resource.total, Some(t) if range.total != Some(t));
-                    if resource.validators.conflicts_with(&validators) || total_changed {
+                    if matches!(resource.total, Some(t) if range.total != Some(t)) {
                         return Err(fatal(source_changed()));
+                    }
+                    if resource.validators.conflicts_with(&validators) {
+                        return self.verify_copy(validators).await;
                     }
                     return Ok(Accepted::Stream);
                 };
                 let resource = self.resource.as_mut().expect("range implies a response");
-                let total_changed =
-                    matches!((resource.total, range.total), (Some(a), Some(b)) if a != b);
-                if resource.validators.conflicts_with(&validators) || total_changed {
+                if matches!((resource.total, range.total), (Some(a), Some(b)) if a != b) {
                     return Err(fatal(source_changed()));
+                }
+                if resource.validators.conflicts_with(&validators) {
+                    return if range.total.is_some() && range.total == resource.total {
+                        self.verify_copy(validators).await
+                    } else {
+                        Err(fatal(source_changed()))
+                    };
                 }
                 if range.first != start {
                     resource.ranges = false;
@@ -725,9 +744,16 @@ impl<'a> Engine<'a> {
                 let Some(resource) = self.resource.as_mut() else {
                     return self.begin(final_url, response, total, validators);
                 };
-                let total_changed = matches!((resource.total, total), (Some(a), Some(b)) if a != b);
-                if resource.validators.conflicts_with(&validators) || total_changed {
-                    return Err(fatal(source_changed()));
+                match resource
+                    .validators
+                    .compare(resource.total, &validators, total)
+                {
+                    Comparison::Same => {}
+                    Comparison::Changed if total.is_some() && total == resource.total => {
+                        return self.verify_copy(validators).await;
+                    }
+                    Comparison::Changed => return Err(fatal(source_changed())),
+                    Comparison::Unrelated => return Err(not_the_file(total)),
                 }
                 if range_start.is_some() {
                     // Same representation, but the server ignored the range: start over.
@@ -752,6 +778,99 @@ impl<'a> Engine<'a> {
             )))),
             _ => Err(classify_status(response)),
         }
+    }
+
+    /// The server names the file differently (`theirs`) at the same size, as mirrors with their
+    /// own copies do. Download saved blocks again: if they all match, it is the same file and
+    /// the transfer continues bound to `theirs`; if any differs, the file changed.
+    async fn verify_copy(&mut self, theirs: Validators) -> Result<Accepted, AttemptError> {
+        let fatal = AttemptError::Fatal;
+        let samples = match self.writer.as_mut() {
+            Some(writer) => writer
+                .samples(COPY_SAMPLES)
+                .await
+                .map_err(|err| fatal(write_failure(self.dest.as_ref(), &err)))?,
+            None => Vec::new(),
+        };
+        let Some(if_range) = theirs.if_range().filter(|_| !samples.is_empty()) else {
+            return Err(fatal(source_changed()));
+        };
+        let inconclusive = || AttemptError::Retryable {
+            reason: "the server switched between copies of the file".into(),
+            retry_after: None,
+        };
+        let stall = self.settings.stall_timeout;
+        for (start, end, expected) in &samples {
+            let (start, end) = (*start, *end);
+            let request = RangeRequest {
+                start,
+                end: Some(end),
+                if_range: Some(if_range),
+            };
+            let fetch = async {
+                let (_, response) = self
+                    .transport
+                    .get(0, &self.settings.url, Some(request), |_| {})
+                    .await?;
+                let range = header_str(response.headers(), header::CONTENT_RANGE)
+                    .and_then(parse_content_range);
+                let got = Validators::from_headers(response.headers());
+                if response.status().as_u16() != 206
+                    || range.map(|r| (r.first, r.last + 1)) != Some((start, end))
+                    || got.is_empty()
+                    || got.conflicts_with(&theirs)
+                {
+                    return Err(inconclusive());
+                }
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|err| AttemptError::Retryable {
+                        reason: err.to_string(),
+                        retry_after: None,
+                    })?;
+                if body.len() as u64 != end - start {
+                    return Err(AttemptError::Retryable {
+                        reason: "connection closed early".into(),
+                        retry_after: None,
+                    });
+                }
+                Ok(hex(&Sha256::digest(&body)))
+            };
+            let hash = tokio::select! {
+                reason = self.stop.wait() => return Err(fatal(self.interrupted(reason))),
+                result = tokio::time::timeout(stall, fetch) => match result {
+                    Err(_) => return Err(AttemptError::Retryable {
+                        reason: format!("no response for {}", seconds(stall)),
+                        retry_after: None,
+                    }),
+                    Ok(result) => result?,
+                },
+            };
+            if hash != *expected {
+                return Err(fatal(source_changed()));
+            }
+        }
+        let resource = self.resource.as_mut().expect("a copy implies a response");
+        let message = format!(
+            "the server now sends another copy of the file ({} instead of {}); {} saved \
+             blocks match it, continuing",
+            describe(&theirs),
+            describe(&resource.validators),
+            samples.len()
+        );
+        resource.validators = theirs.clone();
+        if let Some(crew) = &self.crew {
+            crew.rebind(theirs.clone());
+        }
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .rebind(theirs)
+                .await
+                .map_err(|err| fatal(write_failure(self.dest.as_ref(), &err)))?;
+        }
+        self.reporter.event(Event::Notice { message });
+        Ok(Accepted::Rebound)
     }
 
     /// First usable response: choose the destination, then continue its saved progress or
@@ -790,10 +909,10 @@ impl<'a> Engine<'a> {
                 }
                 Found::Resume(recovered) => {
                     let saved = &recovered.state;
-                    let total_changed =
-                        matches!((saved.total, total), (Some(a), Some(b)) if a != b);
-                    if saved.validators.conflicts_with(&validators) || total_changed {
-                        return Err(fatal(source_changed()));
+                    match saved.validators.compare(saved.total, &validators, total) {
+                        Comparison::Same => {}
+                        Comparison::Changed => return Err(fatal(source_changed())),
+                        Comparison::Unrelated => return Err(not_the_file(total)),
                     }
                     self.adopt(*recovered).map_err(fatal)?;
                     return Ok(Accepted::Recovered);
@@ -983,6 +1102,24 @@ fn source_changed() -> Failure {
     Failure::conflict("the file changed on the server during the download").with_hint(
         "the partial data was kept; run again with --restart to fetch the current version",
     )
+}
+
+/// How a copy of the file is named, for messages.
+fn describe(validators: &Validators) -> String {
+    match (&validators.etag, &validators.strong_last_modified) {
+        (Some(etag), _) => format!("ETag {etag}"),
+        (None, Some(modified)) => format!("last modified {modified}"),
+        (None, None) => "no validator".into(),
+    }
+}
+
+/// A response that is not the file, such as an error page sent with `200 OK`; worth a retry.
+fn not_the_file(length: Option<u64>) -> AttemptError {
+    let size = length.map(|n| format!(" of {n} bytes")).unwrap_or_default();
+    AttemptError::Retryable {
+        reason: format!("the server sent a response{size} that is not the file"),
+        retry_after: None,
+    }
 }
 
 pub fn write_failure(dest: Option<&Destination>, err: &std::io::Error) -> Failure {

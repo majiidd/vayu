@@ -12,7 +12,11 @@
 //! controller lowers the connection count; the lead's retry policy covers the transfer as a
 //! whole. Outcomes on a helper:
 //!
-//! * a changed source (validators, size) stops the transfer with a conflict, keeping the data;
+//! * a changed size, or other validators at another length, stops the transfer with a
+//!   conflict, keeping the data;
+//! * other validators at the same size, as from a mirror with its own copy, remove one
+//!   connection; the lead verifies the copy against saved blocks before the crew continues
+//!   with it ([`Crew::rebind`]);
 //! * a full response to a range request, a 416, or a refusal before ranges were ever served
 //!   means the server does not offer this: segmentation ends and the lead continues alone;
 //! * 429 and 503 halve the connection count; network failures, stalls, early closes, and later
@@ -37,7 +41,7 @@ use crate::cli::Settings;
 use crate::error::Failure;
 use crate::metrics::{Event, Reporter, SegmentView};
 use crate::storage::WriteHandle;
-use crate::transport::http::{Validators, parse_content_range};
+use crate::transport::http::{Comparison, Validators, parse_content_range};
 use crate::transport::{AttemptError, RangeRequest, Transport, classify_status};
 
 const TICK: Duration = Duration::from_millis(250);
@@ -53,7 +57,7 @@ pub struct Context {
     pub reporter: Reporter,
     pub stop: Stop,
     pub writes: WriteHandle,
-    /// The representation the transfer is bound to.
+    /// The representation the transfer is bound to when it starts.
     pub validators: Validators,
     pub limiter: Option<Arc<Limiter>>,
     /// Connections kept in total, the lead included.
@@ -83,6 +87,8 @@ pub struct Shared {
     notes: mpsc::UnboundedSender<Note>,
     /// A helper received a valid partial response: the server serves ranges.
     proven: AtomicBool,
+    /// The representation the transfer is bound to now.
+    validators: Mutex<Validators>,
 }
 
 impl Shared {
@@ -118,6 +124,12 @@ impl Crew {
             failed: watch::channel(false).0,
             notes,
             proven: AtomicBool::new(false),
+            validators: Mutex::new(
+                context
+                    .as_ref()
+                    .map(|c| c.validators.clone())
+                    .unwrap_or_default(),
+            ),
         });
         let (cancel, cancelled) = watch::channel(false);
         let supervisor = context.filter(|c| c.max_connections > 1).map(|context| {
@@ -147,6 +159,11 @@ impl Crew {
 
     pub fn notify(&self) {
         self.shared.notify();
+    }
+
+    /// Bind later helper requests to another copy of the same file, verified by the lead.
+    pub fn rebind(&self, validators: Validators) {
+        *self.shared.validators.lock().expect("validators lock") = validators;
     }
 
     /// Report the lead's time to first byte or failures to the controller.
@@ -371,10 +388,11 @@ async fn helper(
             }
         };
         let (start, end) = work.range();
+        let bound = shared.validators.lock().expect("validators lock").clone();
         let request = RangeRequest {
             start,
             end: Some(end),
-            if_range: ctx.validators.if_range(),
+            if_range: bound.if_range(),
         };
         let sent = Instant::now();
         let send = ctx
@@ -406,7 +424,7 @@ async fn helper(
             Some(Ok(Ok((_, response)))) => response,
         };
         let served = shared.proven.load(Ordering::Relaxed);
-        if let Err(end) = check(&ctx, &response, start, total, served) {
+        if let Err(end) = check(&bound, &response, start, total, served) {
             give_back(&work);
             return end;
         }
@@ -450,7 +468,7 @@ async fn helper(
 
 /// Validate a response to a helper's range request for `[start, ..)` of `total` bytes.
 fn check(
-    ctx: &Context,
+    bound: &Validators,
     response: &Response,
     start: u64,
     total: u64,
@@ -466,6 +484,9 @@ fn check(
             ),
         )
     };
+    // Other validators at the same size: perhaps a mirror's copy of the same file. The lead
+    // checks it against saved blocks; until then this connection is not needed.
+    let other_copy = || HelperEnd::Failed { throttled: false };
     match response.status().as_u16() {
         206 => {
             let Some(range) =
@@ -475,8 +496,11 @@ fn check(
                     "the server sent a partial response without a valid Content-Range".into(),
                 ));
             };
-            if ctx.validators.conflicts_with(&validators) || range.total != Some(total) {
+            if range.total.is_some_and(|t| t != total) {
                 return Err(changed());
+            }
+            if bound.conflicts_with(&validators) {
+                return Err(other_copy());
             }
             if range.first != start {
                 return Err(HelperEnd::Unsupported(
@@ -491,9 +515,14 @@ fn check(
             Ok(())
         }
         200 => {
-            let length_changed = response.content_length().is_some_and(|len| len != total);
-            if ctx.validators.conflicts_with(&validators) || length_changed {
-                return Err(changed());
+            match bound.compare(Some(total), &validators, response.content_length()) {
+                Comparison::Same => {}
+                Comparison::Changed if response.content_length() == Some(total) => {
+                    return Err(other_copy());
+                }
+                Comparison::Changed => return Err(changed()),
+                // Often how a host turns away one request too many: back off as if throttled.
+                Comparison::Unrelated => return Err(HelperEnd::Failed { throttled: true }),
             }
             Err(HelperEnd::Unsupported(
                 "the server ignores range requests from additional connections".into(),

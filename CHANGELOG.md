@@ -27,7 +27,8 @@ The first public beta. Everything below is new.
     the server throttles them.
   - `--min-connections` keeps a floor of connections on segmented downloads even when more do
     not raise throughput; throttling may go below it until the cooldown passes.
-  - Every partial response is validated against the source's identity.
+  - Every partial response is validated against the source's identity. An error page sent
+    with `200 OK` is retried, not mistaken for a new version of the file.
   - Vayu falls back to one connection when a server does not support ranges safely.
 - A shared `--limit-rate` across all connections.
 
@@ -37,7 +38,9 @@ The first public beta. Everything below is new.
   - one SHA-256 per 64 KiB block;
   - at most a few seconds of work is lost on a crash or power loss.
 - Running the same command again resumes from saved progress, but only when the server proves
-  it is the same file (strong validator or `--checksum`).
+  it is the same file (strong validator or `--checksum`). When a mirror sends its own copy
+  under other validators at the same size, up to 8 saved blocks are downloaded again from it,
+  and the download continues only if all of them match.
 - Saved data that cannot be verified is downloaded again.
 - `--resume-from` continues with a replacement URL, for example a newly signed link.
 - `--restart` starts over.
