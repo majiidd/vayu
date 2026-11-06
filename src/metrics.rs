@@ -51,8 +51,6 @@ pub struct Snapshot {
     pub received: u64,
     /// Bytes covered by the latest durable checkpoint.
     pub saved: u64,
-    /// When that checkpoint was published.
-    pub saved_at: Option<Instant>,
     pub total: Option<u64>,
     /// Smoothed bytes per second.
     pub speed: f64,
@@ -80,7 +78,6 @@ impl Snapshot {
             host,
             received: 0,
             saved: 0,
-            saved_at: None,
             total: None,
             speed: 0.0,
             eta_speed: 0.0,
@@ -186,40 +183,18 @@ struct Inner {
 }
 
 /// The latest durable checkpoint, recorded by the writer thread.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Durable {
-    epoch: Instant,
     bytes: AtomicU64,
-    /// Milliseconds after `epoch`, plus one; zero means never.
-    at: AtomicU64,
-}
-
-impl Default for Durable {
-    fn default() -> Self {
-        Durable {
-            epoch: Instant::now(),
-            bytes: AtomicU64::new(0),
-            at: AtomicU64::new(0),
-        }
-    }
 }
 
 impl Durable {
     pub fn record(&self, bytes: u64) {
         self.bytes.store(bytes, Ordering::Relaxed);
-        let ms = self.epoch.elapsed().as_millis() as u64 + 1;
-        self.at.store(ms, Ordering::Release);
     }
 
     pub fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
-    }
-
-    fn at(&self) -> Option<Instant> {
-        match self.at.load(Ordering::Acquire) {
-            0 => None,
-            ms => Some(self.epoch + Duration::from_millis(ms - 1)),
-        }
     }
 }
 
@@ -336,7 +311,6 @@ impl Reporter {
                     }
                     s.received = received;
                     s.saved = inner.durable.bytes();
-                    s.saved_at = inner.durable.at();
                     s.elapsed = now.duration_since(s.started);
                     if sample {
                         s.speed = meter.rate(now, SPEED_WINDOW);

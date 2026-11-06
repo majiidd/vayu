@@ -82,9 +82,9 @@ sha256() {
   fi
 }
 
-# True if FILE is a vayu built from this project (vayu-download).
+# True if FILE is a vayu built from this project.
 ours() {
-  "$1" --version 2>/dev/null | grep -q '(vayu-download)'
+  "$1" --version 2>/dev/null | grep -q '(vayu)'
 }
 
 dest=$dir/vayu

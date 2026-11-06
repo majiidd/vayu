@@ -96,6 +96,5 @@ If a gate fails, fix it on `main` and tag the next candidate (`-rc.2`).
 2. **Publish the draft:** check the draft's notes, then publish it.
 3. **Homebrew:** confirm that the Homebrew workflow passed and that
    `brew install majiidd/vayu/vayu` installs the new version.
-4. **crates.io:** run `make publish-crate` from the tagged commit. The crate is
-   `vayu-download`; the executable is still `vayu`.
+4. **crates.io:** run `make publish-crate` from the tagged commit.
 5. **Next cycle:** add a fresh `## Unreleased` heading to `CHANGELOG.md`.

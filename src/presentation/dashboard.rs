@@ -204,13 +204,8 @@ fn standard(snap: &Snapshot, view: &View, detailed: bool) -> Vec<Line> {
     lines.push(state);
 
     let mut footer = Line::new();
-    footer.plain(indent).push(Role::Muted, "Saved ");
-    match snap.saved_at {
-        Some(at) if snap.saved > 0 => footer.plain(text::ago(at.elapsed())),
-        _ => footer.plain(g.dash),
-    };
     footer
-        .plain("    ")
+        .plain(indent)
         .push(Role::Muted, "Elapsed ")
         .plain(text::duration(snap.elapsed));
     let hint = "Ctrl+C to stop";
@@ -680,7 +675,6 @@ mod tests {
             s.connections = 1;
             s.elapsed = Duration::from_secs(820);
             s.saved = 600 * 1024 * 1024;
-            s.saved_at = Instant::now().checked_sub(Duration::from_secs(2));
         });
         rx.borrow().clone()
     }
@@ -712,7 +706,7 @@ mod tests {
         assert!(lines[5].contains("Speed  800 KiB/s") && lines[5].contains("Peak  940 KiB/s"));
         assert!(lines[6].contains("Connections  1") && lines[6].contains("Downloading"));
         assert!(lines[7].contains("Elapsed 13:40") && lines[7].contains("Ctrl+C to stop"));
-        assert!(lines[7].starts_with("  Saved 2s ago"), "{}", lines[7]);
+        assert!(lines[7].starts_with("  Elapsed 13:40"), "{}", lines[7]);
         assert!(lines.len() <= 8);
         // The bar and the right-aligned text share an edge.
         assert_eq!(text::width(&lines[2]), text::width(&lines[3]));

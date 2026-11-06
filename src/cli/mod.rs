@@ -29,7 +29,7 @@ Exit codes:
   141  JSON event pipe closed    143  terminated (SIGTERM)";
 
 /// `--version`: the crate name lets installers tell this `vayu` from unrelated programs.
-const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (vayu-download)");
+const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (vayu)");
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,7 +51,7 @@ pub struct Args {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
     pub min_connections: Option<u16>,
 
-    /// Upper bound on simultaneous connections [default: 8]
+    /// Upper bound on simultaneous connections [default: 15, or the minimum if higher]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
     pub max_connections: Option<u16>,
 
@@ -235,7 +235,7 @@ pub struct Settings {
 }
 
 pub const DEFAULT_MIN_CONNECTIONS: u16 = 1;
-pub const DEFAULT_MAX_CONNECTIONS: u16 = 8;
+pub const DEFAULT_MAX_CONNECTIONS: u16 = 15;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -274,28 +274,11 @@ impl Settings {
         let mut ca_certs = config.ca_cert.unwrap_or_default();
         ca_certs.extend(args.ca_cert);
 
-        let max_connections = args
-            .max_connections
-            .or(config.max_connections)
-            .unwrap_or(DEFAULT_MAX_CONNECTIONS);
-        if !(1..=64).contains(&max_connections) {
-            return Err(Failure::usage("max_connections must be between 1 and 64"));
-        }
-        let min_connections = args
-            .min_connections
-            .or(config.min_connections)
-            .unwrap_or(DEFAULT_MIN_CONNECTIONS);
-        if !(1..=64).contains(&min_connections) {
-            return Err(Failure::usage("min_connections must be between 1 and 64"));
-        }
-        // A configured minimum yields to a lower maximum, e.g. `--max-connections 1`.
-        if args.min_connections.is_some() && min_connections > max_connections {
-            return Err(Failure::usage(format!(
-                "--min-connections {min_connections} is above max_connections ({max_connections})"
-            ))
-            .with_hint("raise --max-connections or lower --min-connections"));
-        }
-        let min_connections = min_connections.min(max_connections);
+        let (min_connections, max_connections) = connections(
+            args.min_connections,
+            config.min_connections,
+            args.max_connections.or(config.max_connections),
+        )?;
 
         let checkpoint_interval = config
             .checkpoint_interval
@@ -352,6 +335,32 @@ impl Settings {
     }
 }
 
+/// Resolve the connection bounds from the command line minimum, the configured minimum, and
+/// the maximum from either.
+fn connections(
+    cli_min: Option<u16>,
+    config_min: Option<u16>,
+    max: Option<u16>,
+) -> Result<(u16, u16), Failure> {
+    let min = cli_min.or(config_min).unwrap_or(DEFAULT_MIN_CONNECTIONS);
+    if !(1..=64).contains(&min) {
+        return Err(Failure::usage("min_connections must be between 1 and 64"));
+    }
+    // Without a maximum, a higher minimum raises it.
+    let max = max.unwrap_or(DEFAULT_MAX_CONNECTIONS.max(min));
+    if !(1..=64).contains(&max) {
+        return Err(Failure::usage("max_connections must be between 1 and 64"));
+    }
+    // A configured minimum yields to a lower maximum, e.g. `--max-connections 1`.
+    if cli_min.is_some() && min > max {
+        return Err(Failure::usage(format!(
+            "--min-connections {min} is above max_connections ({max})"
+        ))
+        .with_hint("raise --max-connections or lower --min-connections"));
+    }
+    Ok((min.min(max), max))
+}
+
 fn parse_download_url(input: &str) -> Result<Url, Failure> {
     let url = Url::parse(input.trim()).map_err(|err| {
         Failure::usage(format!("invalid URL: {err}"))
@@ -392,6 +401,20 @@ mod tests {
         assert!(parse_download_url("http://127.0.0.1:8080/x").is_ok());
         assert!(parse_download_url("ftp://example.com/file").is_err());
         assert!(parse_download_url("example.com/file").is_err());
+    }
+
+    #[test]
+    fn connection_bounds() {
+        let bounds = |cli_min, config_min, max| connections(cli_min, config_min, max).ok();
+        assert_eq!(bounds(None, None, None), Some((1, 15)));
+        assert_eq!(bounds(Some(5), None, None), Some((5, 15)));
+        // Without a maximum, a minimum above the default raises it.
+        assert_eq!(bounds(Some(20), None, None), Some((20, 20)));
+        assert_eq!(bounds(None, Some(20), None), Some((20, 20)));
+        assert_eq!(bounds(Some(20), None, Some(30)), Some((20, 30)));
+        assert_eq!(bounds(Some(5), None, Some(2)), None);
+        assert_eq!(bounds(None, Some(4), Some(1)), Some((1, 1)));
+        assert_eq!(bounds(None, Some(0), None), None);
     }
 
     #[test]

@@ -74,4 +74,4 @@ jobs:
     steps:
       - run: brew install majiidd/vayu/vayu
       - run: brew test vayu
-      - run: vayu --version | grep -F "${TAG#v} (vayu-download)"
+      - run: vayu --version | grep -F "${TAG#v} (vayu)"

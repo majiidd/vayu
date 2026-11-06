@@ -60,12 +60,11 @@ browser download, run `xattr -d com.apple.quarantine vayu` once.
 **From source**, with stable Rust (`rust-toolchain.toml` pins the tested toolchain):
 
 ```sh
-cargo install vayu-download --locked     # from crates.io
-cargo install --path . --locked          # from a checkout
+cargo install vayu --locked     # from crates.io
+cargo install --path . --locked # from a checkout
 ```
 
-The crate is named `vayu-download`, because `vayu` on crates.io belongs to an unrelated project.
-The executable is still `vayu`, and `vayu --version` prints `vayu X.Y.Z (vayu-download)`.
+`vayu --version` prints `vayu X.Y.Z (vayu)`.
 
 ## Usage
 
@@ -86,8 +85,8 @@ vayu "https://example.com/new-signed-url" --resume-from file.zip.vayu
 | Option | Behavior |
 | --- | --- |
 | `-o, --output PATH` | Destination file, or an existing directory (or a path ending in `/`) to save into |
-| `--max-connections N` | Upper bound on simultaneous connections (1–64, default 8). Vayu adds connections up to this bound only while they help; `1` downloads over a single stream |
-| `--min-connections N` | Lower bound on simultaneous connections once a download is segmented (1–64, default 1). Vayu starts with this many and keeps them even when measurement says more do not help. Above `--max-connections` it is an error on the command line; a configured value is lowered to the maximum |
+| `--max-connections N` | Upper bound on simultaneous connections (1–64, default 15, or the minimum when that is higher). Vayu adds connections up to this bound only while they help; `1` downloads over a single stream |
+| `--min-connections N` | Lower bound on simultaneous connections once a download is segmented (1–64, default 1). Vayu starts with this many and keeps them even when measurement says more do not help. When no maximum is set, it raises the maximum to match. Above an explicit `--max-connections` it is an error on the command line; a configured value is lowered to the maximum |
 | `--proxy URL` | `http://`, `https://`, `socks5://` (local DNS) or `socks5h://` (DNS at the proxy); credentials go in the URL |
 | `--no-proxy` | Ignore proxy environment variables and system proxy settings |
 | `-H, --header NAME:VALUE` | Extra request header (repeatable) |
@@ -345,7 +344,7 @@ Optional TOML, read from `$VAYU_CONFIG`, or `$XDG_CONFIG_HOME/vayu/config.toml`,
 macOS. Command-line options take precedence. Unknown keys are errors.
 
 ```toml
-max-connections = 8
+max-connections = 15
 min-connections = 1
 proxy = "socks5h://127.0.0.1:1080"   # or "system" / "none"
 retry = "auto"                        # or "forever", or a number

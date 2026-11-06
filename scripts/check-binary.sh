@@ -32,4 +32,4 @@ case $target in
     # and command-line downloads, which are not quarantined.
     codesign --verify --verbose "$bin" ;;
 esac
-"$bin" --version | grep -q '(vayu-download)'
+"$bin" --version | grep -q '(vayu)'

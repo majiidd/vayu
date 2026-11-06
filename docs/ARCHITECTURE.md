@@ -1,6 +1,6 @@
 # Architecture
 
-Vayu is a single binary crate (`vayu-download`) with separate internal modules. Modules
+Vayu is a single binary crate (`vayu`) with separate internal modules. Modules
 will be split into their own crates only when there is real reuse.
 
 ```text
@@ -94,8 +94,8 @@ The writer thread checkpoints in this order:
 2. write the new generation to `NAME.vayu.tmp` and `sync_all` it;
 3. rename it over `NAME.vayu`;
 4. sync the directory;
-5. report the saved byte count to `metrics::Durable`, which the dashboard shows as "Saved Ns
-   ago".
+5. report the saved byte count to `metrics::Durable`, which JSON events report as
+   `saved_bytes`.
 
 The first generation is published when `.part` is created, before any body bytes. A `.part`
 without a `.vayu` therefore always means a foreign or pre-M2 leftover. Resetting to zero
@@ -266,7 +266,7 @@ with stderr on a PTY slave. Depending on the case, it makes that PTY the control
   - Asset names carry no version, so `releases/latest/download/…` always resolves.
   - `scripts/install.sh` depends on that. It is POSIX `sh`, tested under dash and BusyBox. It
     verifies `SHA256SUMS` and refuses to replace a `vayu` whose `--version` lacks
-    `(vayu-download)`.
+    `(vayu)`.
 - `.github/workflows/release.yml` runs on version tags.
   - **Gates:** the test matrix and cargo-deny.
   - **Builds:** six targets, each with a linkage check and distribution smoke tests.

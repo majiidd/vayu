@@ -60,7 +60,7 @@ class Vayu < Formula
   end
 
   test do
-    assert_match "(vayu-download)", shell_output("#{bin}/vayu --version")
+    assert_match "(vayu)", shell_output("#{bin}/vayu --version")
   end
 end
 EOF

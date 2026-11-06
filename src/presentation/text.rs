@@ -149,18 +149,6 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
-/// Coarse age for status lines: `2s ago`, `5m ago`, `3h ago`.
-pub fn ago(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else {
-        format!("{}h ago", secs / 3600)
-    }
-}
-
 /// Remove credentials, fragment, and query values from a URL for display and logs.
 /// Query keys stay visible; signed links carry their secrets in the values.
 pub fn redact_url(url: &Url) -> String {
