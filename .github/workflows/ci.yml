@@ -1,0 +1,154 @@
+name: CI
+
+# Every branch push runs CI. A pull request from this repository already has that push's checks
+# on its head commit, so its pull_request run skips every job (see `if:` below); without that,
+# each push would run everything twice and the duplicate macOS jobs would queue for runners.
+# Pull requests from forks have no push run here and run in full.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request or branch cancels the run it supersedes. Release runs
+# (workflow_call from a tag) are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Line tables keep test backtraces useful at a fraction of full debug info's build, link,
+  # and cache cost.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  # Formatting and lints do not depend on the platform: check them once.
+  lint:
+    name: lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # rust-toolchain.toml pins the exact tested toolchain.
+      - run: make toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: make lint
+
+  test:
+    name: test (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Intel macOS test run is the slowest job by far, so only main, release tags, and
+        # manual runs include it. On other branches the x86_64-apple-darwin package job still
+        # runs the release binary and the installer on Intel.
+        os: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && '["macos-latest", "macos-15-intel", "ubuntu-latest", "ubuntu-24.04-arm"]' || '["macos-latest", "ubuntu-latest", "ubuntu-24.04-arm"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: make toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      # Keep debug assertions enabled: recovery tests exercise injected crash points.
+      - run: make test test-release
+
+  build:
+    name: package (${{ matrix.target }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            macos: "11.0"
+          # Certificate verification requires SecTrustEvaluateWithError (macOS 10.14+).
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            macos: "10.14"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+    steps:
+      - uses: actions/checkout@v7
+      - if: endsWith(matrix.target, '-musl')
+        run: make musl-deps
+      - run: make toolchain
+      # Dependencies only: cargo rebuilds vayu itself, so release binaries never come from a
+      # cached build of this crate.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: make release
+      - run: make check-binary
+      - name: Smoke test on musl and glibc distributions
+        if: runner.os == 'Linux'
+        run: make smoke
+      - run: make package
+      - name: Test the native installer against the packaged binary
+        if: runner.os == 'macOS' || endsWith(matrix.target, '-musl')
+        run: make test-installer
+      - name: Test the installer under BusyBox sh
+        if: endsWith(matrix.target, '-musl')
+        run: make test-installer-busybox
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vayu-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  distribution:
+    name: release assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: vayu-*
+          path: dist
+          merge-multiple: true
+      - name: Verify tag, combine checksums, and include the installer
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: |
+          make dist
+          make -s release-notes > /dev/null
+      - name: Test the assembled release
+        run: make test-installer
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+
+  audit:
+    name: licenses and advisories
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@v2

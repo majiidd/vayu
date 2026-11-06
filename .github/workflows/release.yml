@@ -1,0 +1,45 @@
+name: Release
+
+# Run the same checks and package the same assets as every CI run. A version tag opens a
+# draft release; publishing a stable draft makes releases/latest/download/install.sh live.
+# A manual run validates and uploads workflow artifacts without creating a GitHub release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: draft release
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          make -s release-notes TAG="$GITHUB_REF_NAME" > notes.md
+          prerelease=
+          [[ $GITHUB_REF_NAME == *-* ]] && prerelease=--prerelease
+          gh release create "$GITHUB_REF_NAME" --draft $prerelease \
+            --title "Vayu ${GITHUB_REF_NAME#v}" --notes-file notes.md dist/*
