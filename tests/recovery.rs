@@ -457,11 +457,11 @@ fn another_copy_of_the_same_file_is_verified_and_resumed() {
     );
     assert_eq!(std::fs::read(dir.path().join("m.bin")).unwrap(), body);
     let requests = server.requests();
-    // The If-Range miss, four saved blocks checked, then the rest under the new ETag.
+    // The If-Range miss, four full blocks and the partial prefix checked, then the rest.
     let last = requests.last().unwrap();
     assert_eq!(last.range_start(), Some(saved as usize), "{requests:?}");
     assert_eq!(last.header("if-range"), Some("\"mirror\""));
-    assert_eq!(requests.len(), 7, "{requests:?}");
+    assert_eq!(requests.len(), 8, "{requests:?}");
 }
 
 #[test]
@@ -480,6 +480,230 @@ fn another_copy_with_other_bytes_at_the_same_size_is_a_change() {
     assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
     assert!(stderr(&out).contains("changed on the server"));
     assert_eq!(saved_prefix(&dir.path().join("n.bin.vayu")), saved);
+}
+
+#[test]
+fn another_copy_cannot_change_a_saved_partial_block() {
+    const MIB: usize = 1 << 20;
+    let body = payload(6 * MIB);
+    let mut copy = body.clone();
+    copy[MIB + 5] ^= 1;
+    copy[5 * MIB + 5] ^= 1;
+    let server = another_copy(&body, MIB + 100, copy);
+    let dir = tempdir();
+    let url = server.url("/partial-change.bin");
+    let saved = interrupted_run(dir.path(), &url);
+    assert_eq!(saved, (MIB + 100) as u64);
+    let out = run(dir.path(), &[&url, "--max-connections", "1"], &[]);
+    assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
+    assert!(!dir.path().join("partial-change.bin").exists());
+    assert_eq!(
+        saved_prefix(&dir.path().join("partial-change.bin.vayu")),
+        saved
+    );
+}
+
+#[test]
+fn another_copy_cannot_skip_a_saved_complete_block() {
+    const MIB: usize = 1 << 20;
+    let body = payload(20 * MIB);
+    let mut copy = body.clone();
+    copy[MIB + 5] ^= 1;
+    let server = another_copy(&body, 12 * MIB + 100, copy);
+    let dir = tempdir();
+    let url = server.url("/omitted-change.bin");
+    interrupted_run(dir.path(), &url);
+    let out = run(dir.path(), &[&url, "--max-connections", "1"], &[]);
+    assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
+    assert!(!dir.path().join("omitted-change.bin").exists());
+}
+
+#[test]
+fn another_copy_with_only_partial_progress_stops_safely() {
+    let body = payload(SIZE);
+    let server = another_copy(&body, SIZE / 2, body.clone());
+    let dir = tempdir();
+    let url = server.url("/small-copy.bin");
+    interrupted_run(dir.path(), &url);
+    let out = run(dir.path(), &[&url, "--max-connections", "1"], &[]);
+    assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
+    assert!(!dir.path().join("small-copy.bin").exists());
+    assert_eq!(
+        std::fs::read(dir.path().join("small-copy.bin.part")).unwrap(),
+        &body[..SIZE / 2]
+    );
+}
+
+#[test]
+fn another_copy_rate_limiting_does_not_count_as_a_network_stall() {
+    const MIB: usize = 1 << 20;
+    let body = payload(3 * MIB);
+    let server = another_copy(&body, MIB + 100, body.clone());
+    let dir = tempdir();
+    let url = server.url("/limited-copy.bin");
+    interrupted_run(dir.path(), &url);
+    let out = run(
+        dir.path(),
+        &[
+            &url,
+            "--max-connections",
+            "1",
+            "--limit-rate",
+            "2M",
+            "--stall-timeout",
+            "200ms",
+            "--retry",
+            "0",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read(dir.path().join("limited-copy.bin")).unwrap(),
+        body
+    );
+}
+
+#[test]
+fn another_copy_can_resume_with_parallel_ranges() {
+    const MIB: usize = 1 << 20;
+    let body = payload(20 * MIB);
+    let server = another_copy(&body, 4 * MIB + 100, body.clone());
+    let dir = tempdir();
+    let url = server.url("/parallel-copy.bin");
+    interrupted_run(dir.path(), &url);
+    let out = run(
+        dir.path(),
+        &[&url, "--min-connections", "3", "--max-connections", "3"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read(dir.path().join("parallel-copy.bin")).unwrap(),
+        body
+    );
+}
+
+#[test]
+fn verification_rejects_excess_body_with_and_without_content_length() {
+    const MIB: usize = 1 << 20;
+    for declared in [false, true] {
+        let body = payload(6 * MIB);
+        let served = body.clone();
+        let server = Server::start(move |req| {
+            if req.attempt == 1 {
+                return Reply::full(&served)
+                    .header("ETag", ETAG)
+                    .cut_after(MIB + 100);
+            }
+            if let Some((start, Some(end))) = req.range() {
+                let mut reply = Reply::new(206)
+                    .header("ETag", "\"mirror\"")
+                    .header(
+                        "Content-Range",
+                        format!("bytes {start}-{}/{}", end - 1, served.len()),
+                    )
+                    .body(vec![0; end - start + 1]);
+                if declared {
+                    reply = reply.header("Content-Length", (end - start + 1).to_string());
+                }
+                return reply;
+            }
+            Reply::ranged(&served, req).header("ETag", "\"mirror\"")
+        });
+        let dir = tempdir();
+        let url = server.url("/excess-copy.bin");
+        interrupted_run(dir.path(), &url);
+        let out = run(
+            dir.path(),
+            &[&url, "--max-connections", "1", "--retry", "0"],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+        assert!(stderr(&out).contains("verification"), "{}", stderr(&out));
+        assert!(!dir.path().join("excess-copy.bin").exists());
+    }
+}
+
+#[test]
+fn verification_requires_the_new_binding_size_and_identity_encoding() {
+    const MIB: usize = 1 << 20;
+    for invalid in ["binding", "total", "encoding"] {
+        let body = payload(6 * MIB);
+        let server = Server::start(move |req| {
+            if req.attempt == 1 {
+                return Reply::full(&body).header("ETag", ETAG).cut_after(MIB + 100);
+            }
+            if let Some((start, Some(end))) = req.range() {
+                let mut reply = Reply::slice(&body, start, end);
+                if invalid == "binding" {
+                    return reply
+                        .header("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+                        .header("Date", "Tue, 02 Jan 2024 00:00:00 GMT");
+                }
+                if invalid == "total" {
+                    reply.headers.retain(|(name, _)| name != "Content-Range");
+                    reply = reply.header(
+                        "Content-Range",
+                        format!("bytes {start}-{}/{}", end - 1, body.len() + 1),
+                    );
+                }
+                if invalid == "encoding" {
+                    reply = reply.header("Content-Encoding", "gzip");
+                }
+                return reply.header("ETag", "\"mirror\"");
+            }
+            Reply::ranged(&body, req).header("ETag", "\"mirror\"")
+        });
+        let dir = tempdir();
+        let url = server.url("/invalid-copy.bin");
+        interrupted_run(dir.path(), &url);
+        let out = run(
+            dir.path(),
+            &[&url, "--max-connections", "1", "--retry", "0"],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(3), "{invalid}: {}", stderr(&out));
+        assert!(!dir.path().join("invalid-copy.bin").exists());
+    }
+}
+
+#[test]
+fn verification_still_times_out_an_idle_network_read() {
+    const MIB: usize = 1 << 20;
+    let body = payload(3 * MIB);
+    let server = Server::start(move |req| {
+        if req.attempt == 1 {
+            return Reply::full(&body).header("ETag", ETAG).cut_after(MIB + 100);
+        }
+        let mut reply = Reply::ranged(&body, req).header("ETag", "\"mirror\"");
+        if matches!(req.range(), Some((_, Some(_)))) {
+            reply.stall = Some(Duration::from_millis(500));
+        }
+        reply
+    });
+    let dir = tempdir();
+    let url = server.url("/stalled-copy.bin");
+    let saved = interrupted_run(dir.path(), &url);
+    let out = run(
+        dir.path(),
+        &[
+            &url,
+            "--max-connections",
+            "1",
+            "--stall-timeout",
+            "100ms",
+            "--retry",
+            "0",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(!dir.path().join("stalled-copy.bin").exists());
+    assert_eq!(
+        saved_prefix(&dir.path().join("stalled-copy.bin.vayu")),
+        saved
+    );
 }
 
 #[test]

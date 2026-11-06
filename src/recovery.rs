@@ -14,7 +14,7 @@
 //! * Nothing here deletes saved data, except the recovery files of a download whose final file
 //!   is already in place and verified against the saved block hashes.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -104,6 +104,7 @@ pub fn examine(
     by_user: bool,
     reporter: &Reporter,
 ) -> Result<Found, Failure> {
+    dest.check_parent()?;
     if fs::symlink_metadata(&dest.state).is_err() {
         return Ok(Found::Nothing);
     }
@@ -115,10 +116,7 @@ pub fn examine(
             )));
         }
         Ok(_) => {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&dest.part)
+            let file = storage::safety::open(&dest.part, true)
                 .map_err(|e| io_failure("open", &dest.part, &e))?;
             storage::lock(&file, &dest.part)?;
             Some(file)
@@ -168,7 +166,7 @@ pub fn examine(
 
     if fs::symlink_metadata(&dest.path).is_ok() {
         // The lock on the partial file, if any, is held until cleanup is done.
-        let done = finish_published(dest, &state, checksum.as_ref(), reporter)?;
+        let done = finish_published(dest, &state, checksum.as_ref(), reporter, part.as_ref())?;
         drop(part);
         return Ok(Found::Published(done));
     }
@@ -178,6 +176,7 @@ pub fn examine(
             discarded: 0,
         });
     };
+    storage::safety::single_link(&file).map_err(|e| io_failure("use", &dest.part, &e))?;
 
     reporter.phase(Phase::Recovering);
     let ledger = Ledger::recover(&file, &state).map_err(|e| io_failure("read", &dest.part, &e))?;
@@ -240,6 +239,7 @@ fn finish_published(
     state: &State,
     checksum: Option<&Checksum>,
     reporter: &Reporter,
+    part: Option<&File>,
 ) -> Result<Completion, Failure> {
     let exists = || {
         Failure::conflict(format!("{} already exists", dest.path.display()))
@@ -248,7 +248,14 @@ fn finish_published(
     let Some(total) = state.total.filter(|&t| t == state.prefix()) else {
         return Err(exists());
     };
-    let file = File::open(&dest.path).map_err(|_| exists())?;
+    let file = storage::safety::open(&dest.path, false).map_err(|_| exists())?;
+    if let Some(part) = part {
+        let original = part.metadata().map_err(|_| exists())?;
+        let published = file.metadata().map_err(|_| exists())?;
+        if !storage::safety::same_file(&original, &published) {
+            return Err(exists());
+        }
+    }
     if file.metadata().map(|m| m.len()).ok() != Some(total) {
         return Err(exists());
     }

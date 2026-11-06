@@ -44,9 +44,8 @@ enum Command {
     },
     Checkpoint(oneshot::Sender<()>),
     Reset(oneshot::Sender<()>),
-    Samples {
-        max: usize,
-        reply: oneshot::Sender<Vec<(u64, u64, String)>>,
+    Snapshot {
+        reply: oneshot::Sender<Ledger>,
     },
     Rebind {
         validators: Validators,
@@ -159,10 +158,10 @@ impl PartWriter {
         Ok(())
     }
 
-    /// Up to `max` complete saved blocks spread over the data, as `(start, end, SHA-256)`.
-    pub async fn samples(&mut self, max: usize) -> io::Result<Vec<(u64, u64, String)>> {
+    /// Snapshot the ledger after all earlier queued writes. Callers stop other producers first.
+    pub async fn snapshot(&mut self) -> io::Result<Ledger> {
         let (reply, wait) = oneshot::channel();
-        let command = Command::Samples { max, reply };
+        let command = Command::Snapshot { reply };
         if self.handle.tx.send(command).await.is_err() {
             return Err(self.error().await);
         }
@@ -330,8 +329,8 @@ fn run(
                 w.file.set_len(0)?;
                 let _ = reply.send(());
             }
-            Command::Samples { max, reply } => {
-                let _ = reply.send(w.ledger.samples(max));
+            Command::Snapshot { reply } => {
+                let _ = reply.send(w.ledger.clone());
             }
             Command::Rebind { validators, reply } => {
                 w.cp.state.validators = validators;
@@ -385,6 +384,29 @@ mod tests {
         let block_size = cp.state.block_size;
         let writer = PartWriter::spawn(file, Ledger::new(block_size), cp).unwrap();
         (writer, durable)
+    }
+
+    #[tokio::test]
+    async fn snapshot_includes_every_earlier_queued_partial_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut writer, _) = setup(&dir, Some(4 << 20));
+        let handle = writer.handle();
+        handle
+            .write(0, Bytes::from(vec![7; (1 << 20) + 100]))
+            .await
+            .unwrap();
+        handle
+            .write(3 << 20, Bytes::from_static(b"tail"))
+            .await
+            .unwrap();
+        let snapshot = writer.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.ranges(),
+            vec![[0, (1 << 20) + 100], [3 << 20, (3 << 20) + 4]]
+        );
+        assert_eq!(snapshot.verification_blocks().len(), 3);
+        drop(handle);
+        writer.finish(false).await.unwrap();
     }
 
     #[tokio::test]

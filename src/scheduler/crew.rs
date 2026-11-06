@@ -15,8 +15,8 @@
 //! * a changed size, or other validators at another length, stops the transfer with a
 //!   conflict, keeping the data;
 //! * other validators at the same size, as from a mirror with its own copy, remove one
-//!   connection; the lead verifies the copy against saved blocks before the crew continues
-//!   with it ([`Crew::rebind`]);
+//!   connection; the lead stops the crew and verifies every retained byte before starting
+//!   replacement workers with the new binding;
 //! * a full response to a range request, a 416, or a refusal before ranges were ever served
 //!   means the server does not offer this: segmentation ends and the lead continues alone;
 //! * 429 and 503 halve the connection count; network failures, stalls, early closes, and later
@@ -161,11 +161,6 @@ impl Crew {
         self.shared.notify();
     }
 
-    /// Bind later helper requests to another copy of the same file, verified by the lead.
-    pub fn rebind(&self, validators: Validators) {
-        *self.shared.validators.lock().expect("validators lock") = validators;
-    }
-
     /// Report the lead's time to first byte or failures to the controller.
     pub fn signal(&self, signal: Signal) {
         let _ = self.shared.notes.send(Note::Signal(signal));
@@ -181,6 +176,21 @@ impl Crew {
 
     pub fn take_failure(&self) -> Option<CrewFailure> {
         self.shared.failure.lock().expect("failure lock").take()
+    }
+
+    /// A successful barrier means no old-bound helper can enqueue another write. On timeout,
+    /// callers must stop the transfer rather than install a different representation binding.
+    pub async fn quiesce(&mut self) -> bool {
+        self.cancel.send_replace(true);
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            match tokio::time::timeout(SHUTDOWN, supervisor).await {
+                Ok(Ok(())) => {
+                    self.supervisor = None;
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// Stop all helpers and wait until their last writes are queued. A stalled disk cannot hold
@@ -655,4 +665,39 @@ fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
 pub fn identity_encoding(headers: &HeaderMap) -> bool {
     header_str(headers, header::CONTENT_ENCODING)
         .is_none_or(|e| e.trim().is_empty() || e.trim().eq_ignore_ascii_case("identity"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn verification_barrier_waits_for_supervisor_completion() {
+        let mut crew = Crew::start(Plan::new(1024, 64, &[]), None);
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let complete = Arc::new(AtomicBool::new(false));
+        let finished = complete.clone();
+        crew.supervisor = Some(tokio::spawn(async move {
+            wait.await.unwrap();
+            finished.store(true, Ordering::SeqCst);
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), crew.quiesce())
+                .await
+                .is_err()
+        );
+        assert!(!complete.load(Ordering::SeqCst));
+        release.send(()).unwrap();
+        assert!(crew.quiesce().await);
+        assert!(complete.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn failed_supervisor_cannot_authorize_rebinding() {
+        let mut crew = Crew::start(Plan::new(1024, 64, &[]), None);
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        crew.supervisor = Some(task);
+        assert!(!crew.quiesce().await);
+    }
 }

@@ -50,8 +50,6 @@ use crate::transport::{AttemptError, RangeRequest, Transport, classify_error, cl
 const MIN_SEGMENTED_BLOCKS: u64 = 4;
 /// The lead splits another segment only when its owner has at least this much work left.
 const LEAD_STEAL_SECS: f64 = 2.0;
-/// Saved blocks downloaded again to check that another copy of the file has the same bytes.
-const COPY_SAMPLES: usize = 8;
 
 /// What the first response revealed about the remote representation.
 struct Resource {
@@ -781,18 +779,29 @@ impl<'a> Engine<'a> {
     }
 
     /// The server names the file differently (`theirs`) at the same size, as mirrors with their
-    /// own copies do. Download saved blocks again: if they all match, it is the same file and
-    /// the transfer continues bound to `theirs`; if any differs, the file changed.
+    /// own copies do. Compare every saved byte before continuing bound to `theirs`.
+    /// Helpers stop before the snapshot so no old-bound bytes arrive after verification.
     async fn verify_copy(&mut self, theirs: Validators) -> Result<Accepted, AttemptError> {
         let fatal = AttemptError::Fatal;
-        let samples = match self.writer.as_mut() {
+        if let Some(crew) = self.crew.as_mut()
+            && !crew.quiesce().await
+        {
+            return Err(fatal(source_changed()));
+        }
+        let ledger = match self.writer.as_mut() {
             Some(writer) => writer
-                .samples(COPY_SAMPLES)
+                .snapshot()
                 .await
                 .map_err(|err| fatal(write_failure(self.dest.as_ref(), &err)))?,
-            None => Vec::new(),
+            None => return Err(fatal(source_changed())),
         };
-        let Some(if_range) = theirs.if_range().filter(|_| !samples.is_empty()) else {
+        let samples = ledger.verification_blocks();
+        // Preserve the conservative behavior for progress smaller than one complete block.
+        let Some(if_range) = theirs.if_range().filter(|_| {
+            samples
+                .iter()
+                .any(|(start, end, _)| end - start == ledger.block_size())
+        }) else {
             return Err(fatal(source_changed()));
         };
         let inconclusive = || AttemptError::Retryable {
@@ -800,6 +809,10 @@ impl<'a> Engine<'a> {
             retry_after: None,
         };
         let stall = self.settings.stall_timeout;
+        let stalled = || AttemptError::Retryable {
+            reason: format!("no response for {}", seconds(stall)),
+            retry_after: None,
+        };
         for (start, end, expected) in &samples {
             let (start, end) = (*start, *end);
             let request = RangeRequest {
@@ -808,44 +821,63 @@ impl<'a> Engine<'a> {
                 if_range: Some(if_range),
             };
             let fetch = async {
-                let (_, response) = self
-                    .transport
-                    .get(0, &self.settings.url, Some(request), |_| {})
-                    .await?;
+                let (_, response) = tokio::time::timeout(
+                    stall,
+                    self.transport
+                        .get(0, &self.settings.url, Some(request), |_| {}),
+                )
+                .await
+                .map_err(|_| stalled())??;
                 let range = header_str(response.headers(), header::CONTENT_RANGE)
                     .and_then(parse_content_range);
                 let got = Validators::from_headers(response.headers());
                 if response.status().as_u16() != 206
-                    || range.map(|r| (r.first, r.last + 1)) != Some((start, end))
-                    || got.is_empty()
+                    || range.map(|r| (r.first, r.last + 1, r.total))
+                        != Some((start, end, self.resource.as_ref().and_then(|r| r.total)))
+                    || !identity_encoding(response.headers())
+                    || got.if_range() != Some(if_range)
                     || got.conflicts_with(&theirs)
                 {
                     return Err(inconclusive());
                 }
-                let body = response
-                    .bytes()
+                if response
+                    .content_length()
+                    .is_some_and(|len| len != end - start)
+                {
+                    return Err(fatal(Failure::remote(
+                        "the server sent an invalid verification length",
+                    )));
+                }
+                let mut body = response.bytes_stream();
+                let mut received = 0u64;
+                let mut hasher = Sha256::new();
+                while let Some(chunk) = tokio::time::timeout(stall, body.next())
                     .await
-                    .map_err(|err| AttemptError::Retryable {
-                        reason: err.to_string(),
-                        retry_after: None,
-                    })?;
-                if body.len() as u64 != end - start {
+                    .map_err(|_| stalled())?
+                {
+                    let chunk = chunk.map_err(|err| classify_error(&err, &self.settings.url))?;
+                    if chunk.len() as u64 > (end - start) - received {
+                        return Err(fatal(Failure::remote(
+                            "the server sent excess verification data",
+                        )));
+                    }
+                    received += chunk.len() as u64;
+                    hasher.update(&chunk);
+                    if let Some(limiter) = &self.limiter {
+                        limiter.consume(chunk.len() as u64).await;
+                    }
+                }
+                if received != end - start {
                     return Err(AttemptError::Retryable {
                         reason: "connection closed early".into(),
                         retry_after: None,
                     });
                 }
-                Ok(hex(&Sha256::digest(&body)))
+                Ok(hex(&hasher.finalize()))
             };
             let hash = tokio::select! {
                 reason = self.stop.wait() => return Err(fatal(self.interrupted(reason))),
-                result = tokio::time::timeout(stall, fetch) => match result {
-                    Err(_) => return Err(AttemptError::Retryable {
-                        reason: format!("no response for {}", seconds(stall)),
-                        retry_after: None,
-                    }),
-                    Ok(result) => result?,
-                },
+                result = fetch => result?,
             };
             if hash != *expected {
                 return Err(fatal(source_changed()));
@@ -854,20 +886,31 @@ impl<'a> Engine<'a> {
         let resource = self.resource.as_mut().expect("a copy implies a response");
         let message = format!(
             "the server now sends another copy of the file ({} instead of {}); {} saved \
-             blocks match it, continuing",
+             block prefixes match it, continuing",
             describe(&theirs),
             describe(&resource.validators),
             samples.len()
         );
         resource.validators = theirs.clone();
-        if let Some(crew) = &self.crew {
-            crew.rebind(theirs.clone());
-        }
         if let Some(writer) = self.writer.as_mut() {
             writer
                 .rebind(theirs)
                 .await
                 .map_err(|err| fatal(write_failure(self.dest.as_ref(), &err)))?;
+        }
+        // The old crew has crossed the shutdown barrier, and the writer snapshot contains
+        // every queued write. Restart from those exact ranges with the new binding.
+        if self.crew.take().is_some() {
+            self.segment = None;
+            self.received = ledger.prefix();
+            self.start_crew(Plan::new(
+                self.resource
+                    .as_ref()
+                    .and_then(|r| r.total)
+                    .expect("segments need a size"),
+                ledger.block_size(),
+                &ledger.ranges(),
+            ));
         }
         self.reporter.event(Event::Notice { message });
         Ok(Accepted::Rebound)

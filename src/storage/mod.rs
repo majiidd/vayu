@@ -5,11 +5,13 @@
 //! complete, synchronized, and verified. An existing destination is never overwritten.
 
 pub mod ledger;
+pub mod safety;
 pub mod writer;
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use percent_encoding::percent_decode_str;
@@ -61,6 +63,14 @@ impl Destination {
 
     fn at(path: PathBuf) -> Destination {
         let path = std::path::absolute(&path).unwrap_or(path);
+        // Keep the resolved namespace, rather than looking up a mutable symlink alias later.
+        let path = match (
+            path.parent().and_then(|p| p.canonicalize().ok()),
+            path.file_name(),
+        ) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => path,
+        };
         let with = |suffix: &str| {
             let mut name = OsString::from(path.as_os_str());
             name.push(suffix);
@@ -97,9 +107,11 @@ impl Destination {
             .read(true)
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&self.part)
         {
             Ok(file) => {
+                safety::single_link(&file).map_err(|e| self.io_failure(&e))?;
                 lock(&file, &self.part)?;
                 Ok(file)
             }
@@ -111,11 +123,8 @@ impl Destination {
                         self.part.display()
                     )));
                 }
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&self.part)
-                    .map_err(|e| self.io_failure(&e))?;
+                let file = safety::open(&self.part, true).map_err(|e| self.io_failure(&e))?;
+                safety::single_link(&file).map_err(|e| self.io_failure(&e))?;
                 lock(&file, &self.part)?;
                 if !take_over {
                     return Err(self.incomplete_conflict());
@@ -151,6 +160,14 @@ impl Destination {
     /// data is complete; after it, the final file can be checked against the state's block
     /// hashes and the leftovers removed.
     pub fn publish(&self, finished: Finished) -> Result<(), Failure> {
+        self.check_parent()?;
+        let actual = fs::symlink_metadata(&self.part).map_err(|e| self.io_failure(&e))?;
+        let verified = safety::validate(&finished.file).map_err(|e| self.io_failure(&e))?;
+        if !actual.is_file() || !safety::same_file(&actual, &verified) || verified.nlink() != 1 {
+            return Err(Failure::conflict(
+                "the partial file was replaced before publication",
+            ));
+        }
         fault::point("finalize-before-link");
         match fs::hard_link(&self.part, &self.path) {
             Ok(()) => {
@@ -166,10 +183,10 @@ impl Destination {
             }
             // Some file systems (FAT, some network mounts) lack hard links.
             Err(_) => {
-                if fs::symlink_metadata(&self.path).is_ok() {
-                    return Err(self.appeared_conflict());
-                }
-                fs::rename(&self.part, &self.path).map_err(|err| {
+                safety::rename_noreplace(&self.part, &self.path).map_err(|err| {
+                    if err.kind() == ErrorKind::AlreadyExists {
+                        return self.appeared_conflict();
+                    }
                     Failure::storage(format!(
                         "cannot move {} into place: {}",
                         self.part.display(),
@@ -184,6 +201,7 @@ impl Destination {
     }
 
     fn ensure_free(&self) -> Result<(), Failure> {
+        self.check_parent()?;
         if fs::symlink_metadata(&self.path).is_ok() {
             return Err(
                 Failure::conflict(format!("{} already exists", self.path.display()))
@@ -200,6 +218,13 @@ impl Destination {
             )));
         }
         Ok(())
+    }
+
+    pub fn check_parent(&self) -> Result<(), Failure> {
+        safety::check_parent(&self.path).map_err(|err| {
+            Failure::conflict(format!("cannot safely use {}: {err}", self.path.display()))
+                .with_hint("choose an owner-controlled destination directory with -o")
+        })
     }
 
     fn incomplete_conflict(&self) -> Failure {
@@ -348,11 +373,15 @@ mod tests {
     fn part_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
         let dest = Destination::resolve(Some(dir.path()), "f.bin");
-        assert_eq!(dest.path, dir.path().join("f.bin"));
-        assert_eq!(dest.part, dir.path().join("f.bin.part"));
+        assert_eq!(dest.path, dir.path().canonicalize().unwrap().join("f.bin"));
+        assert_eq!(
+            dest.part,
+            dir.path().canonicalize().unwrap().join("f.bin.part")
+        );
         dest.precheck(false).unwrap();
 
         let file = dest.open_part(false).unwrap();
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
         // A second claimant is refused while the first holds the lock, even with --restart.
         let err = dest.open_part(true).unwrap_err();
         assert!(
@@ -398,5 +427,34 @@ mod tests {
         assert!(err.message.contains("appeared"));
         assert_eq!(fs::read(&dest.path).unwrap(), b"someone else's file");
         assert!(dest.part.exists());
+    }
+
+    #[test]
+    fn publication_rejects_a_replaced_partial_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = Destination::resolve(Some(dir.path()), "f.bin");
+        let file = dest.open_part(false).unwrap();
+        fs::remove_file(&dest.part).unwrap();
+        fs::write(&dest.part, b"unverified replacement").unwrap();
+        assert!(
+            dest.publish(Finished {
+                file,
+                bytes: 0,
+                sha256: [0; 32]
+            })
+            .is_err()
+        );
+        assert!(!dest.path.exists());
+    }
+
+    #[test]
+    fn restart_rejects_a_hard_link_to_another_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = Destination::resolve(Some(dir.path()), "f.bin");
+        let outside = dir.path().join("unrelated");
+        fs::write(&outside, b"keep this file").unwrap();
+        fs::hard_link(&outside, &dest.part).unwrap();
+        assert!(dest.open_part(true).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep this file");
     }
 }

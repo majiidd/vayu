@@ -58,7 +58,8 @@ main ─ app ─┬─ cli           arguments, TOML config, precedence, exit co
    complete size and returns the length of the contiguous data and its SHA-256. `app` checks
    that this length is the full size and verifies the checksum. Then `Destination::publish` hard-links
    `.part` to the final name. That operation fails if the name already exists. On filesystems
-   without hard links, it checks for an existing file and then renames. Afterwards it syncs the
+   without hard links, it uses an atomic no-replace rename (and fails safely when unsupported).
+   The source inode must match the verified open file. Afterwards it syncs the
    directory and removes `.part` and `.vayu`.
 
 ## State file and checkpoints
@@ -91,7 +92,8 @@ block.
 The writer thread checkpoints in this order:
 
 1. flush the buffer and `sync_data` the part file;
-2. write the new generation to `NAME.vayu.tmp` and `sync_all` it;
+2. unlink a stale `NAME.vayu.tmp` entry, create it exclusively with owner-only permissions,
+   write the new generation and `sync_all` it;
 3. rename it over `NAME.vayu`;
 4. sync the directory;
 5. report the saved byte count to `metrics::Durable`, which JSON events report as
@@ -127,13 +129,23 @@ and `finalize-part-removed` let the tests abort at each step.
    requested. Complete progress goes straight to finalization.
 
 A response with other validators but the same size, as from a mirror with its own copy, is not
-a conflict by itself. The engine asks the writer for up to 8 complete saved blocks spread over
-the data, requests each again through the original URL with the new validator as `If-Range`,
-and compares hashes. Every sample must come back as `206` for exactly that block, under the new
-validators; anything else, such as a redirect back to the first copy, is retried without a
-verdict. If all hashes match, the new validators replace the old ones in memory, in the crew,
-and in a newly published state generation. A single mismatch is a conflict. Helpers that meet
-such a copy end as failed and leave the check to the lead.
+a conflict by itself. The engine first stops and joins the old helper workers, then obtains a
+writer snapshot after all their queued writes. It requests every retained block prefix,
+including partial blocks, through the original URL with the new validator as `If-Range` and
+compares hashes. Each response must be identity-encoded `206` for exactly that prefix and total
+size, with the requested strong binding. Bodies are streamed, hashed and rate-limited, with an
+exact byte ceiling rather than full-body allocation. If every hash matches, the new validators
+are checkpointed and a new crew starts from the verified ranges. A mismatch keeps the old
+progress and reports a conflict. This may re-read all retained data when a mirror changes.
+
+All mutating paths use a resolved destination parent whose ancestor chain is owned by the
+current user or root. Group/other-writable non-sticky directories and mutating Darwin ACL
+grants are rejected. Sticky system temporary directories remain usable because existing
+files must belong to the current user, lack other-user write access and be regular files.
+Existing partials are opened with no-follow and nonblocking flags and must have one link before
+being modified. Recovery permits the intentional finalization hard link only when the final
+and partial descriptors identify the same verified file. These checks protect against other
+users; root and hostile processes running as the same user retain the account's authority.
 
 
 ## Segmented transfers

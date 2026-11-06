@@ -160,25 +160,16 @@ impl Ledger {
         ranges
     }
 
-    /// Up to `max` complete blocks spread over the saved data, first and last included, as
-    /// `(start, end, hash)`.
-    pub fn samples(&self, max: usize) -> Vec<(u64, u64, String)> {
+    /// Every occupied block prefix, including partial blocks, as `(start, end, hash)`.
+    pub fn verification_blocks(&self) -> Vec<(u64, u64, String)> {
         let b = self.block_size;
-        let full: Vec<(u64, u64, String)> = self
-            .blocks
+        self.blocks
             .iter()
             .enumerate()
-            .filter_map(|(index, block)| match block {
-                Block::Full(hash) => Some((index as u64 * b, (index as u64 + 1) * b, hash.clone())),
-                Block::Partial { .. } => None,
+            .filter_map(|(index, block)| {
+                let start = index as u64 * b;
+                block.hash().map(|hash| (start, start + block.len(b), hash))
             })
-            .collect();
-        if full.len() <= max {
-            return full;
-        }
-        let step = (full.len() - 1) as f64 / (max - 1).max(1) as f64;
-        (0..max)
-            .map(|i| full[(i as f64 * step).round() as usize].clone())
             .collect()
     }
 
@@ -305,25 +296,24 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_complete_blocks_spread_over_the_saved_data() {
+    fn verification_covers_every_saved_byte_including_partial_blocks() {
         let b = BLOCK as usize;
         let mut ledger = Ledger::new(BLOCK);
         // Blocks 0-2, half of block 3, and blocks 10-19.
         ledger.record(0, &data(3 * b + b / 2)).unwrap();
         ledger.record(10 * BLOCK, &data(10 * b)).unwrap();
-        let offsets = |n| -> Vec<u64> {
-            ledger
-                .samples(n)
-                .into_iter()
-                .map(|(start, _, _)| start / BLOCK)
-                .collect()
-        };
+        let blocks = ledger.verification_blocks();
+        let offsets: Vec<u64> = blocks.iter().map(|(start, _, _)| start / BLOCK).collect();
         assert_eq!(
-            offsets(20),
-            [0, 1, 2, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            offsets,
+            [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
-        assert_eq!(offsets(4), [0, 11, 15, 19]);
-        let (start, end, hash) = &ledger.samples(1)[0];
+        assert_eq!(blocks[3].1 - blocks[3].0, BLOCK / 2);
+        assert_eq!(
+            blocks.iter().map(|(a, b, _)| b - a).sum::<u64>(),
+            ledger.bytes()
+        );
+        let (start, end, hash) = &blocks[0];
         assert_eq!((*start, *end), (0, BLOCK));
         assert_eq!(Some(hash), ledger.hashes()[0].as_ref());
     }

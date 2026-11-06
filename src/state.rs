@@ -9,7 +9,7 @@
 //! an optional expected checksum, the byte ranges that are durably on disk, and a SHA-256 of the
 //! saved bytes of each block. Credentials, headers, and cookies are never stored.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -278,7 +278,7 @@ fn is_hex(s: &str) -> bool {
 
 /// Read and validate a state file without trusting its size.
 pub fn load(path: &Path) -> Result<State, LoadError> {
-    let file = File::open(path).map_err(LoadError::Io)?;
+    let file = crate::storage::safety::open(path, false).map_err(LoadError::Io)?;
     let mut bytes = Vec::new();
     file.take(MAX_STATE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -292,19 +292,34 @@ pub fn load(path: &Path) -> Result<State, LoadError> {
 /// Replace the state file atomically: write a synchronized temporary file next to it, rename it
 /// over the old one, then synchronize the directory. Readable and writable by the owner only.
 pub fn publish(state: &State, path: &Path, tmp: &Path) -> io::Result<()> {
+    let parent = crate::storage::safety::parent(path)?;
+    if crate::storage::safety::parent(tmp)? != parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "checkpoint paths must share a directory",
+        ));
+    }
+    let path = parent.join(path.file_name().ok_or(io::ErrorKind::InvalidInput)?);
+    let tmp = parent.join(tmp.file_name().ok_or(io::ErrorKind::InvalidInput)?);
+    // Crash leftovers are unlinked, never opened or truncated. Exclusive creation also
+    // fails safely if a different entry appears after the unlink (including in /tmp).
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
     let bytes = state.encode();
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(tmp)?;
+        .open(&tmp)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
     fault::point("checkpoint-tmp-written");
-    fs::rename(tmp, path)?;
+    fs::rename(&tmp, &path)?;
     if let Some(parent) = path.parent() {
         crate::storage::sync_dir(parent);
     }
@@ -446,5 +461,21 @@ mod tests {
         assert_eq!(load(&path).unwrap().generation, 7);
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn checkpoint_does_not_follow_a_planted_temporary_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("unrelated");
+        let path = dir.path().join("f.vayu");
+        let tmp = dir.path().join("f.vayu.tmp");
+        std::fs::write(&outside, b"keep this file").unwrap();
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        let _ = publish(&sample(), &path, &tmp);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep this file");
+        std::fs::remove_file(&tmp).ok();
+        std::fs::hard_link(&outside, &tmp).unwrap();
+        let _ = publish(&sample(), &path, &tmp);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep this file");
     }
 }

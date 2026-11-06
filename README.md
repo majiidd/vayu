@@ -46,6 +46,10 @@ vayu "https://example.com/file.zip" -o ~/Downloads/
 Vayu shows progress, speed, and the estimated time remaining. Completed files are never
 overwritten.
 
+Use an owner-controlled destination directory. Vayu refuses directories or ancestors owned by
+another user, non-sticky directories writable by other users, and unsafe writable ACL grants.
+System sticky temporary directories are supported; new partial files are owner-only.
+
 ## Stop and resume
 
 Press **Ctrl+C** to stop. Run the same command again to resume. Keep the `.part` and `.vayu`
