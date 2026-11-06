@@ -108,7 +108,7 @@ class InstallerTests(unittest.TestCase):
         for name in (
             "uname", "sysctl", "cat", "curl", "wget", "sha256sum", "shasum", "perl",
             "cut", "awk", "grep", "mktemp", "rm", "gzip", "tar", "mkdir", "cp",
-            "chmod", "mv",
+            "chmod", "mv", "wc",
         ):
             executable = shutil.which(name)
             if executable:
@@ -165,8 +165,18 @@ class InstallerTests(unittest.TestCase):
         path.chmod(0o755)
 
     def test_default_install_from_a_pipe(self):
-        self.run_installer(piped=True)
+        result = self.run_installer(piped=True)
         self.assert_installed()
+        # Not a terminal: plain text, and the next step for a directory missing from PATH.
+        self.assertNotIn("\033", result.stderr)
+        self.assertIn("Installed vayu", result.stderr)
+        self.assertIn("is not on your PATH", result.stderr)
+
+    def test_verbose_shows_diagnostic_details(self):
+        result = self.run_installer("--verbose")
+        self.assert_installed()
+        self.assertIn(f"{self.base}/{self.asset}", result.stderr)
+        self.assertIn(hashlib.sha256(self.archive.read_bytes()).hexdigest(), result.stderr)
 
     def test_help_from_a_pipe(self):
         result = self.run_installer("--help", piped=True)
@@ -184,10 +194,12 @@ class InstallerTests(unittest.TestCase):
 
     def test_upgrade_and_reinstall(self):
         self.executable(self.dest, "echo 'vayu 0.9.0 (vayu)'")
-        self.run_installer()
+        result = self.run_installer()
         self.assert_installed()
-        self.run_installer()
+        self.assertIn("Updated vayu from 0.9.0", result.stderr)
+        result = self.run_installer()
         self.assert_installed()
+        self.assertIn("Reinstalled vayu", result.stderr)
 
     def test_unrelated_destination_is_preserved_unless_forced(self):
         self.executable(self.dest, "echo 'another program'")
@@ -208,6 +220,19 @@ class InstallerTests(unittest.TestCase):
         self.assert_installed()
         self.assertEqual(other.read_bytes(), before)
 
+    def test_program_on_path_cannot_consume_a_piped_installer(self):
+        # bash, /bin/sh on macOS and some Linux distributions, reads a piped script byte by byte.
+        self.executable(self.tools / "vayu", "cat >/dev/null\necho 'vayu 0.9.0 (vayu)'")
+        self.run_installer(piped=True)
+        self.assert_installed()
+
+    def test_directory_destination_is_refused_even_when_forced(self):
+        self.dest.mkdir(parents=True)
+        result = self.run_installer("--force", ok=False)
+        self.assertIn("is a directory", result.stderr)
+        self.assertEqual(list(self.dest.iterdir()), [])
+        self.assertEqual(list(self.dest.parent.glob(".vayu.install.*")), [])
+
     def test_checksum_mismatch_preserves_an_existing_installation(self):
         archive = self.release / self.asset
         archive.unlink()
@@ -226,7 +251,10 @@ class InstallerTests(unittest.TestCase):
 
     def test_missing_archive(self):
         (self.release / self.asset).unlink()
-        self.run_installer(ok=False)
+        result = self.run_installer(ok=False)
+        self.assertIn("could not download", result.stderr)
+        self.assertIn(f"{self.base}/{self.asset}", result.stderr)
+        self.assertIn("/issues", result.stderr)
         self.assertFalse(self.dest.exists())
 
     def test_invalid_executable(self):
@@ -243,6 +271,7 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer(ok=False)
         self.assertIn("does not run", result.stderr)
         self.assertFalse(self.dest.exists())
+        self.assertEqual(list(self.dest.parent.glob(".vayu.install.*")), [])
 
     def test_invalid_arguments(self):
         for args in (("--unknown",), ("--dir",), ("--version",), ("--dir", ""),
@@ -273,6 +302,11 @@ class InstallerTests(unittest.TestCase):
             "prefix = 'https://github.com/fixture/vayu/releases/'\n"
             "assert args[-1].startswith(prefix), args[-1]\n"
             f"args[-1] = {self.base!r} + '/' + args[-1][len(prefix):]\n"
+            # GitHub downloads are HTTPS-only; allow the fixture server's plain HTTP.
+            "if '--proto' in args:\n"
+            "    i = args.index('--proto') + 1\n"
+            "    assert args[i] == '=https', args[i]\n"
+            "    args[i] = '=http,https'\n"
             f"os.execv({real!r}, [{real!r}, *args])\n"
         )
         shim.chmod(0o755)
