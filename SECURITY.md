@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-Vayu is in public beta. Security fixes go into the latest release only.
+Security fixes go into the latest stable release. Upgrade using the installer or the binary
+archives on [GitHub Releases](https://github.com/majiidd/vayu/releases/latest).
 
 ## Reporting a vulnerability
 

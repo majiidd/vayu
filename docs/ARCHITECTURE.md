@@ -264,18 +264,21 @@ with stderr on a PTY slave. Depending on the case, it makes that PTY the control
 
 - `scripts/package.sh` builds `vayu-TARGET.tar.gz` and its checksum.
   - Asset names carry no version, so `releases/latest/download/…` always resolves.
-  - `scripts/install.sh` depends on that. It is POSIX `sh`, tested under dash and BusyBox. It
+  - `scripts/install.sh` depends on that. It is POSIX `sh`, tested on macOS, Linux, and BusyBox. It
     verifies `SHA256SUMS` and refuses to replace a `vayu` whose `--version` lacks
     `(vayu)`.
-- `.github/workflows/release.yml` runs on version tags.
-  - **Gates:** the test matrix and cargo-deny.
-  - **Builds:** six targets, each with a linkage check and distribution smoke tests.
+- `.github/workflows/ci.yml` runs on branch pushes, pull requests, and manual runs. It is also
+  a reusable workflow called by `.github/workflows/release.yml` for version tags.
+  - **Gates:** the complete debug test matrix, release script tests, and cargo-deny.
+  - **Builds:** six targets, each with a linkage check; Linux targets also run distribution
+    smoke tests. The native installer suite runs on macOS and musl Linux; the latter also
+    runs it under BusyBox `sh`. The combined release assets are verified and tested again.
   - **macOS:** the binaries carry the linker's ad-hoc signature, and there is no Developer ID
-    signing or notarization. They are distributed through Homebrew and the installer, which do
-    not quarantine downloads.
-  - **Publishing:** attests provenance and opens a draft release. A maintainer publishes it
-    after the gates in `docs/RELEASING.md`.
-- `.github/workflows/homebrew.yml` runs when a release is published.
-  - It checks the release's formula against the archives, then commits it to the tap
-    `majiidd/homebrew-vayu`.
-  - It then installs from the tap and runs `brew test` on macOS.
+    signing or notarization. The script installer downloads without browser quarantine flags.
+- `.github/workflows/release.yml` waits for every shared CI job, attests the tested archives,
+  and opens a draft GitHub release. A maintainer publishes it after reviewing the assets and
+  notes, as described in `docs/RELEASING.md`.
+  - A final tag must match the version in `Cargo.toml` exactly, so its executable reports the
+    same version as the release.
+  - Publishing a stable release makes its installer and binary archives available through
+    `releases/latest/download/…`.

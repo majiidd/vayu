@@ -1,77 +1,45 @@
 # Changelog
 
-All notable changes to Vayu are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/). Before 1.0, minor versions may change the command
-line, the JSON event schema, or the `.vayu` state format; each such change is listed below.
+Notable changes to Vayu are recorded here.
 
-## Unreleased
+This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and release versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The first public beta. Everything below is new.
+## [Unreleased]
 
-### Downloading
+## [1.0.0] - 2026-11-06
 
-- Single-binary HTTP/HTTPS downloader:
-  - rustls TLS with the platform's trust store, plus `--ca-cert`;
-  - HTTP/1.1 and HTTP/2;
-  - HTTP, HTTPS, and SOCKS5 proxies, including system proxy settings;
-  - extra request headers and `--header-file`;
-  - Netscape `cookies.txt` files;
-  - redirects with credential scoping;
-  - SHA-256 verification with `--checksum`.
-- Retries with exponential backoff and `Retry-After`, stall detection (`--stall-timeout`), and
-  a retry policy (`--retry auto`, `forever`, or a count of consecutive failures).
-- Adaptive parallel connections (`--max-connections`, default 15; `--min-connections`, default 1):
-  - Every download starts on one connection.
-  - Connections are added only while measurement shows they raise throughput, and removed when
-    the server throttles them.
-  - `--min-connections` keeps a floor of connections on segmented downloads even when more do
-    not raise throughput; throttling may go below it until the cooldown passes. Without a
-    maximum, a minimum above 15 raises the maximum to match.
-  - Every partial response is validated against the source's identity. An error page sent
-    with `200 OK` is retried, not mistaken for a new version of the file.
-  - Vayu falls back to one connection when a server does not support ranges safely.
-- A shared `--limit-rate` across all connections.
+First stable release.
 
-### Recovery
+### Added
 
-- Progress is saved durably in a versioned `.vayu` state file:
-  - one SHA-256 per 64 KiB block;
-  - at most a few seconds of work is lost on a crash or power loss.
-- Running the same command again resumes from saved progress, but only when the server proves
-  it is the same file (strong validator or `--checksum`). When a mirror sends its own copy
-  under other validators at the same size, up to 8 saved blocks are downloaded again from it,
-  and the download continues only if all of them match.
-- Saved data that cannot be verified is downloaded again.
-- `--resume-from` continues with a replacement URL, for example a newly signed link.
-- `--restart` starts over.
-- `SIGINT`, `SIGTERM`, and `SIGHUP` stop safely after saving progress; a second signal exits
-  immediately.
-- Finalization is crash-safe: the destination appears only when complete and verified.
+- HTTP/HTTPS downloads over HTTP/1.1 and HTTP/2, with verified TLS certificates,
+  platform trust stores, and custom certificate authorities through `--ca-cert`.
+- HTTP, HTTPS, and SOCKS5 proxy support, including system proxy settings.
+- Custom request headers, header files, Netscape cookie files, and redirects that keep
+  credentials scoped to their origin.
+- SHA-256 checksum verification before publishing a completed download.
+- Automatic retries with exponential backoff, `Retry-After` support, configurable retry
+  budgets, and stalled-connection detection.
+- Adaptive parallel downloads with configurable connection limits, validated byte ranges,
+  fallback to a single stream, and a shared bandwidth limit.
+- Durable, versioned `.vayu` checkpoints with block hashes and verified resumption after
+  interruptions, crashes, or restarts.
+- Recovery through replacement URLs with `--resume-from`, verification of saved data against
+  mirrors with different validators, and an explicit `--restart` option.
+- Safe shutdown on `SIGINT`, `SIGTERM`, and `SIGHUP`, plus crash-safe finalization that
+  publishes the destination only when the download is complete and verified.
+- An adaptive terminal dashboard with color modes, small-window layouts, SSH-aware refresh
+  rates, and background-job support.
+- Plain output for pipes and basic terminals, versioned JSON Lines events, and stable exit
+  codes for automation.
+- Prebuilt binary archives for macOS on Apple Silicon and Intel, and Linux on x86-64 and
+  ARM64, including static musl and glibc builds.
+- Installation through GitHub Releases using `install.sh` or binary archives, with
+  `SHA256SUMS` and build provenance attestations. The installer verifies checksums and refuses
+  to replace an unrelated program named `vayu` unless explicitly requested.
+- Shared CI and release checks covering all supported targets, recovery, terminal behavior,
+  binary packaging, and installation.
 
-### Terminal and automation
-
-- A live dashboard in color:
-  - 16-color, 256-color, and truecolor palettes, chosen by detection, `NO_COLOR`, and
-    `--color`;
-  - layouts for wide, narrow, and very small windows;
-  - redraws at up to 8 frames per second locally and 2 per second over SSH;
-  - no alternate screen.
-- Plain line output for pipes, `TERM=dumb`, cron, and SSH without a PTY. Versioned JSON Lines
-  events with `--json`.
-- Background jobs (`vayu URL &`) don't draw over the shell. With `stty tostop`, a successful
-  download is never stopped by `SIGTTOU`; only a failure message is written, and it shows on
-  `fg`.
-- Stable exit codes for scripts (see `vayu --help`).
-
-### Distribution
-
-- Release archives:
-  - static Linux builds (musl) for x86-64 and ARM64;
-  - glibc Linux builds;
-  - macOS builds for Apple Silicon and Intel.
-- `SHA256SUMS`, build provenance attestations, an installer that verifies checksums and
-  refuses to replace an unrelated `vayu`, and Homebrew (`brew install majiidd/vayu/vayu`).
-- `vayu --version` reports the crate name (`vayu`), so installers can tell Vayu from
-  unrelated programs named `vayu`.
-- No telemetry: Vayu contacts only the servers and proxies you give it.
+[Unreleased]: https://github.com/majiidd/vayu/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/majiidd/vayu/releases/tag/v1.0.0

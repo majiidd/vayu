@@ -1,8 +1,8 @@
 # Compatibility
 
-What Vayu supports, and what verifies each claim. "CI" means the check runs on every push in
-[`ci.yml`](../.github/workflows/ci.yml) and again before every release in
-[`release.yml`](../.github/workflows/release.yml).
+What Vayu supports, and what verifies each claim. "CI" means the check runs on branch pushes
+and pull requests in [`ci.yml`](../.github/workflows/ci.yml). Version tags run the same workflow
+through [`release.yml`](../.github/workflows/release.yml) before creating a draft release.
 
 ## Platforms
 
@@ -12,7 +12,7 @@ What Vayu supports, and what verifies each claim. "CI" means the check runs on e
 | macOS, Intel | `vayu-x86_64-apple-darwin` | macOS 10.14 | Full test suite on `macos-15-intel` (CI) |
 | Linux x86-64, any distribution | `vayu-x86_64-unknown-linux-musl` (static) | Linux 3.2 | Test suite on Ubuntu; binary run on Alpine, Debian oldstable and stable, and Fedora (CI) |
 | Linux ARM64, any distribution | `vayu-aarch64-unknown-linux-musl` (static) | Linux 4.1 | Test suite on Ubuntu ARM64; the same distribution runs (CI) |
-| Linux x86-64, glibc | `vayu-x86_64-unknown-linux-gnu` | glibc of Ubuntu 22.04 or older, printed by the release build | Runs on Ubuntu 22.04, Debian stable, and Fedora (release) |
+| Linux x86-64, glibc | `vayu-x86_64-unknown-linux-gnu` | glibc of Ubuntu 22.04 or older, printed by the build | Runs on Ubuntu 22.04, Debian stable, and Fedora (CI) |
 | Linux ARM64, glibc | `vayu-aarch64-unknown-linux-gnu` | as above | as above |
 
 Notes on the minimums:
@@ -31,6 +31,15 @@ Notes on the minimums:
 
 Other Unix systems can build from source with `cargo install`; they are not tested. Windows is
 not supported.
+
+## Installation
+
+The [release installer](https://github.com/majiidd/vayu/releases/latest/download/install.sh)
+selects the native macOS archive or the static musl Linux archive. CI tests it with the actual
+packaged executable on each of these four targets, including BusyBox `sh` on Linux. The suite
+checks installation, upgrades, custom directories, conflicting executables, checksum and
+download failures, and latest and pinned release URL selection. The merged release assets
+have their checksums verified and are tested again before upload.
 
 ## Terminals
 
@@ -83,6 +92,6 @@ Behavior during a download:
 ## Servers
 
 Vayu speaks HTTP/1.1 and HTTP/2 over TLS 1.2 and 1.3, directly or through HTTP, HTTPS, and
-SOCKS5 proxies. The end-to-end tests cover the server behaviors listed in the README's
-Development section. They include servers that ignore ranges, change content mid-download,
+SOCKS5 proxies. The end-to-end tests are described in [CONTRIBUTING.md](../CONTRIBUTING.md#tests).
+They include servers that ignore ranges, change content mid-download,
 throttle connections, or answer extra connections with 403 or 503.

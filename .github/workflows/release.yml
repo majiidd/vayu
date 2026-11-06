@@ -1,9 +1,8 @@
 name: Release
 
-# A `v*` tag builds, tests, and packages every target and opens a *draft* GitHub release with the
-# archives, SHA256SUMS, the installer, and a Homebrew formula. A maintainer publishes the draft
-# after the checks in docs/RELEASING.md; publishing updates the Homebrew tap (homebrew.yml). Tags with a hyphen (v0.2.0-rc.1) become prereleases.
-# Running the workflow by hand builds and uploads everything as workflow artifacts only.
+# Run the same checks and package the same assets as every CI run. A version tag opens a
+# draft release; publishing a stable draft makes releases/latest/download/install.sh live.
+# A manual run validates and uploads workflow artifacts without creating a GitHub release.
 
 on:
   push:
@@ -13,132 +12,29 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: make toolchain
-      - run: make fmt-check
-      - run: make clippy
-      # Includes the recovery (tests/recovery.rs) and terminal (tests/terminal.rs) gates.
-      - run: make test
-
-  audit:
-    name: licenses and advisories
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
-  benchmark:
-    name: loopback benchmark
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Builds, then runs every scenario three times into bench.txt.
-      - run: make bench-run REPS=3 BENCH_OUT=bench.txt
-      # Fails when any run failed or produced a different file. An explicit bash shell adds
-      # pipefail, so failures are not hidden by `tee`.
-      - shell: bash
-        run: make -s bench-summary BENCH_OUT=bench.txt | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: benchmark
-          path: bench.txt
-
-  build:
-    name: build (${{ matrix.target }})
-    needs: [test, audit]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-          # The oldest available runners keep the glibc requirement low; musl builds have none.
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-            macos: "11.0"
-          # 10.14 is the first release with SecTrustEvaluateWithError, used to verify certificates.
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            macos: "10.14"
-    runs-on: ${{ matrix.runner }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
-      TARGET: ${{ matrix.target }}
-    steps:
-      - uses: actions/checkout@v4
-      - if: endsWith(matrix.target, '-musl')
-        run: make musl-deps
-      - run: make release
-
-      - name: Check linkage
-        run: make check-binary
-
-      # Images by target: see IMAGES in the Makefile.
-      - name: Smoke test on Linux distributions
-        if: runner.os == 'Linux'
-        run: make smoke
-
-      - run: make package
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vayu-${{ matrix.target }}
-          path: dist/*
+  checks:
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: draft release
-    needs: build
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: vayu-*
-          path: dist
-          merge-multiple: true
-
-      # A tag must match Cargo.toml's version; without one, the release uses that version.
-      - name: Checksums, installer, and Homebrew formula
-        env:
-          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        run: make dist
-
-      - name: Test the installer against these archives
-        run: make test-installer
-
-      - uses: actions/attest-build-provenance@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          subject-path: dist/*.tar.gz
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: release
-          path: dist/*
-
+          path: dist
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
       - name: Create draft release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

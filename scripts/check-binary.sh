@@ -28,8 +28,7 @@ case $target in
   *-darwin)
     otool -l "$bin" | grep -A3 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' | grep -E 'minos|version'
     otool -L "$bin"
-    # Apple Silicon runs only signed code; the linker's ad-hoc signature is enough for Homebrew
-    # and command-line downloads, which are not quarantined.
+    # Apple Silicon requires a signature; the linker's ad-hoc signature permits execution.
     codesign --verify --verbose "$bin" ;;
 esac
 "$bin" --version | grep -q '(vayu)'

@@ -32,12 +32,16 @@ make test                    # unit and end-to-end tests; TEST=name filters
 make test-parallel           # one end-to-end suite (also test-download, -recovery, -terminal)
 make fmt-check
 make clippy                  # warnings are errors
+make test-release            # release script syntax, version gates, and notes
 make deny                    # licenses and advisories (cargo install cargo-deny)
 make check                   # all of the above
 ```
 
-CI runs `make fmt-check`, `make clippy`, and `make test` on macOS (ARM64 and Intel) and Linux
-(x86-64 and ARM64), and cargo-deny on Linux. A pull request needs all of them to pass.
+CI runs `make ci` on macOS (ARM64 and Intel) and Linux (x86-64 and ARM64), and cargo-deny on
+Linux. It builds and packages all six release targets, verifies their linkage, runs Linux
+distribution smoke tests, and tests the installer on macOS and musl Linux, including BusyBox
+`sh`. It also assembles and verifies the combined release assets. A pull request needs all
+jobs to pass. Version tags reuse this workflow before creating a draft release.
 
 ## Tests
 
@@ -48,6 +52,8 @@ CI runs `make fmt-check`, `make clippy`, and `make test` on macOS (ARM64 and Int
 | `tests/recovery.rs` | Saved progress across runs: `kill -9`, injected crashes, damaged state and data, replacement URLs |
 | `tests/parallel.rs` | Segmented transfers, fallback to one connection, throttling, recovery with gaps |
 | `tests/terminal.rs` | The binary on a pseudo-terminal: dashboard and line output, color modes, layouts and resizes, the SSH refresh rate, hang-ups, background jobs |
+| `scripts/test-release.sh` | Exact release-tag matching and changelog extraction |
+| `scripts/test-installer.py` | Real release archives served over loopback: installation, upgrades, directory options, program conflicts, checksum failures, download failures, latest and pinned URLs |
 
 How the end-to-end tests run:
 
@@ -64,29 +70,15 @@ Rules for new tests:
 - Prefer an end-to-end test when the behavior is visible to users.
 - Tests must not depend on the internet or on timing tighter than a few hundred milliseconds.
 
-## Benchmarks
+To run the installer suite locally, build an archive for your machine, then run
+`make test-installer`. For example, on Apple Silicon:
 
-`bench/` holds a local harness:
+```sh
+make release package TARGET=aarch64-apple-darwin
+make test-installer                  # needs Python 3; installs only into temporary directories
+```
 
-- `server.py` is a range server with per-connection, shared, and latency limits.
-- `scenarios.sh` runs the comparison under each condition.
-- `summarize.py` prints the median table.
-
-Changes to the scheduler or the controller should include before-and-after numbers from
-`make bench` (three rounds of every scenario). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for what these numbers
-can and cannot show.
-
-## Compatibility promises
-
-These are user-facing contracts. Change them only deliberately, with a CHANGELOG entry:
-
-- **Exit codes** (`vayu --help`).
-- **The JSON event schema:** it is versioned; add fields freely, but changing or removing one
-  needs a new schema version.
-- **The `.vayu` state format:** it is versioned. A new version must keep refusing, with a
-  clear message, the files it cannot read. It must never misread them.
-- **Display detection:** `NO_COLOR` precedence, the plain output for pipes and `TERM=dumb`,
-  and no alternate screen.
+On Linux, build the native musl target, then also run `make test-installer-busybox` with Docker.
 
 ## Style
 

@@ -2,8 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,16 +21,16 @@ jobs:
       matrix:
         os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       # rust-toolchain.toml pins the exact tested toolchain.
       - run: make toolchain
-      - run: make fmt-check
-      - run: make clippy
-      - run: make test
+      # Keep debug assertions enabled: recovery tests exercise injected crash points.
+      - run: make ci
 
-  portable-linux:
-    name: musl build (${{ matrix.target }})
+  build:
+    name: package (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
@@ -34,23 +39,76 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            macos: "11.0"
+          # Certificate verification requires SecTrustEvaluateWithError (macOS 10.14+).
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            macos: "10.14"
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     env:
       TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
     steps:
-      - uses: actions/checkout@v4
-      - run: make musl-deps
+      - uses: actions/checkout@v7.0.1
+      - if: endsWith(matrix.target, '-musl')
+        run: make musl-deps
       - run: make release
-      - name: Verify the binary has no runtime library dependencies
-        run: make check-binary
+      - run: make check-binary
       - name: Smoke test on musl and glibc distributions
-        run: make smoke IMAGES="alpine:latest debian:stable-slim fedora:latest"
-      - name: Package, then install with the release installer under BusyBox sh
-        run: make package checksums test-installer
+        if: runner.os == 'Linux'
+        run: make smoke
+      - run: make package
+      - name: Test the native installer against the packaged binary
+        if: runner.os == 'macOS' || endsWith(matrix.target, '-musl')
+        run: make test-installer
+      - name: Test the installer under BusyBox sh
+        if: endsWith(matrix.target, '-musl')
+        run: make test-installer-busybox
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: vayu-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  distribution:
+    name: release assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: vayu-*
+          path: dist
+          merge-multiple: true
+      - name: Verify tag, combine checksums, and include the installer
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: |
+          make dist
+          make -s release-notes > /dev/null
+      - name: Test the assembled release
+        run: make test-installer
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
 
   audit:
     name: licenses and advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1

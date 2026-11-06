@@ -2,4 +2,3 @@
 *.part
 *.vayu
 /dist
-/bench.txt

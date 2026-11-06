@@ -3,8 +3,8 @@
 #
 # Usage: scripts/release-notes.sh VERSION
 #
-# Matches a heading like `## 0.2.0 - 2026-12-01` or `## [0.2.0]`. A release candidate
-# (0.2.0-rc.1) uses its own section if there is one, and otherwise the section of the version
+# Matches a heading like `## 1.0.0 - 2026-11-06` or `## [1.0.0]`. A release candidate
+# (1.0.0-rc.1) uses its own section if there is one, and otherwise the section of the version
 # it leads up to.
 set -eu
 

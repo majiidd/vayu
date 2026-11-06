@@ -6,8 +6,7 @@
 #   DIST      directory for release archives (default: dist)
 #   TEST      test name filter for the test targets, e.g. make test TEST=resume
 #   ARGS      arguments for make run
-#   REPS      benchmark rounds (default: 3); SCENARIOS limits them, e.g. SCENARIOS=per-conn-2M
-#   TAG       release tag, e.g. v0.2.0-rc.1, checked against Cargo.toml
+#   TAG       release tag, e.g. v1.0.0, checked against Cargo.toml
 #   IMAGES    container images for make smoke
 #   LOCKED    set empty to let cargo update Cargo.lock (default: --locked)
 
@@ -20,14 +19,10 @@ TARGET ?=
 DIST ?= dist
 TEST ?=
 ARGS ?=
-REPS ?= 3
-SCENARIOS ?=
-BENCH_OUT ?= bench.txt
 TAG ?=
-REPO ?= $(or $(GITHUB_REPOSITORY),majiidd/vayu)
 
 CARGO_VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-# v0.2.0 and v0.2.0-rc.1 release as 0.2.0 and 0.2.0-rc.1; without a tag, Cargo.toml's version.
+# Release tags must match Cargo.toml exactly, including any prerelease suffix.
 VERSION = $(if $(TAG),$(patsubst v%,%,$(TAG)),$(CARGO_VERSION))
 TARGET_FLAG = $(if $(TARGET),--target $(TARGET))
 BIN = target/$(if $(TARGET),$(TARGET)/)release/vayu
@@ -36,9 +31,9 @@ SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || e
 IMAGES ?= $(if $(findstring -musl,$(TARGET)),alpine:latest debian:oldstable-slim debian:stable-slim fedora:latest,ubuntu:22.04 debian:stable-slim fedora:latest)
 
 .PHONY: help build release run install clean toolchain \
-	test test-unit test-download test-recovery test-parallel test-terminal fmt fmt-check clippy lint deny ci check \
-	bench bench-run bench-summary musl-deps check-binary smoke package checksums dist test-installer \
-	check-tag version release-notes publish-crate
+	test test-unit test-download test-recovery test-parallel test-terminal test-release fmt fmt-check clippy lint deny ci check \
+	musl-deps check-binary smoke package checksums dist test-installer test-installer-busybox \
+	check-tag version release-notes
 
 help: ## List the targets
 	@awk 'BEGIN { FS = ":.*## " } \
@@ -70,13 +65,17 @@ toolchain: ## Show the pinned toolchain (rust-toolchain.toml), installing it if 
 ## Checks
 
 test: ## Unit and end-to-end tests (TEST filters by name)
-	$(CARGO) test $(LOCKED) $(TEST)
+	$(CARGO) test --all-targets $(LOCKED) $(TEST)
 
 test-unit: ## Unit tests only
 	$(CARGO) test $(LOCKED) --bin vayu $(TEST)
 
 test-download test-recovery test-parallel test-terminal: test-%: ## One end-to-end suite, tests/NAME.rs
 	$(CARGO) test $(LOCKED) --test $* $(TEST)
+
+test-release: ## Check release scripts and version gates
+	@for script in scripts/*.sh; do sh -n "$$script" || exit 1; done
+	scripts/test-release.sh
 
 fmt: ## Format the code
 	$(CARGO) fmt
@@ -92,20 +91,9 @@ lint: fmt-check clippy ## Formatting and lints
 deny: ## Licenses and advisories (cargo install cargo-deny)
 	$(CARGO) deny check
 
-ci: lint test ## What every CI test job runs
+ci: lint test test-release ## What every CI test job runs
 
 check: ci deny ## Everything a pull request needs
-
-## Benchmarks
-
-bench: bench-run ## Loopback benchmark, then its summary
-	@bench/summarize.py $(BENCH_OUT)
-
-bench-run: release ## Loopback benchmark into BENCH_OUT: REPS rounds of SCENARIOS (default: all)
-	set -o pipefail; bench/scenarios.sh $(REPS) $(SCENARIOS) | tee $(BENCH_OUT)
-
-bench-summary: ## Median table of BENCH_OUT; fails if any run failed or differed
-	@bench/summarize.py $(BENCH_OUT)
 
 ## Release
 
@@ -125,15 +113,17 @@ package: ## Archive the TARGET release binary into DIST
 checksums: ## Collect DIST's archive checksums into DIST/SHA256SUMS and verify them
 	cd $(DIST) && cat ./*.tar.gz.sha256 > SHA256SUMS && rm ./*.tar.gz.sha256 && $(SHA256SUM) -c SHA256SUMS
 
-dist: check-tag checksums ## Release assets in DIST: SHA256SUMS, install.sh, and the Homebrew formula
+dist: check-tag checksums ## Release assets in DIST: archives, SHA256SUMS, and install.sh
 	cp scripts/install.sh $(DIST)/install.sh
-	scripts/homebrew.sh $(VERSION) $(REPO) $(DIST)/SHA256SUMS > $(DIST)/vayu.rb
 
-test-installer: ## Install from DIST with install.sh under BusyBox sh (needs Docker)
+test-installer: ## Test install, upgrades, conflicts, and checksum failures from DIST (needs Python 3)
 	scripts/test-installer.sh $(DIST)
 
+test-installer-busybox: ## Run the installer suite under BusyBox sh (needs Docker)
+	docker run --rm -v "$(CURDIR):/work:ro" -w /work python:3-alpine sh scripts/test-installer.sh $(DIST)
+
 check-tag: ## Fail if TAG does not match the version in Cargo.toml
-	@if [ -n "$(TAG)" ] && [[ "$(VERSION)" != "$(CARGO_VERSION)"* ]]; then \
+	@if [ -n "$(TAG)" ] && [ "$(TAG)" != "v$(CARGO_VERSION)" ]; then \
 		echo "tag $(TAG) does not match Cargo.toml version $(CARGO_VERSION)" >&2; exit 1; \
 	fi
 
@@ -142,6 +132,3 @@ version: ## Print the release version (from TAG, else Cargo.toml)
 
 release-notes: ## Print the CHANGELOG.md section for VERSION
 	@scripts/release-notes.sh $(VERSION)
-
-publish-crate: ## Publish the crate to crates.io
-	$(CARGO) publish --locked

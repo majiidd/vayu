@@ -26,10 +26,24 @@ dir=${VAYU_INSTALL_DIR:-$HOME/.local/bin}
 force=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --version) [ $# -ge 2 ] || die "--version needs a value"; version=${2#v}; shift 2 ;;
-    --dir) [ $# -ge 2 ] || die "--dir needs a value"; dir=$2; shift 2 ;;
+    --version) [ $# -ge 2 ] && [ -n "$2" ] || die "--version needs a value"; version=${2#v}; shift 2 ;;
+    --dir) [ $# -ge 2 ] && [ -n "$2" ] || die "--dir needs a value"; dir=$2; shift 2 ;;
     --force) force=1; shift ;;
-    -h | --help) sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help)
+      cat <<'HELP'
+Usage: sh install.sh [--version X.Y.Z] [--dir DIR] [--force]
+
+Install Vayu from GitHub Releases (latest stable release by default).
+The archive's SHA-256 checksum is verified before installation.
+
+  --version X.Y.Z  Install a specific release (an optional leading v is accepted)
+  --dir DIR        Install into DIR (default: VAYU_INSTALL_DIR or ~/.local/bin)
+  --force          Allow replacing another program named vayu
+  -h, --help       Show this help
+
+Environment: VAYU_REPO, VAYU_BASE_URL, VAYU_INSTALL_DIR.
+HELP
+      exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
