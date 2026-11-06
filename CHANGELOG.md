@@ -7,15 +7,6 @@ and release versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Parallel connections grow faster and further: probes double the connection count
-  while each new connection adds about as much as the others, then settle where the
-  link saturates. A single added connection no longer needs a fixed 10% gain, so
-  servers that limit each connection can use the full `--max-connections`.
-- Gains are confirmed over a second measurement window before connections are kept,
-  so measurement noise adds fewer useless connections.
-
 ## [1.0.0] - 2026-11-06
 
 First stable release.
@@ -31,7 +22,9 @@ First stable release.
 - Automatic retries with exponential backoff, `Retry-After` support, configurable retry
   budgets, and stalled-connection detection.
 - Adaptive parallel downloads with configurable connection limits, validated byte ranges,
-  fallback to a single stream, and a shared bandwidth limit.
+  fallback to a single stream, and a shared bandwidth limit. Connections double while each
+  new one adds about as much as the others, then settle where the link saturates; gains are
+  confirmed over a second measurement window before extra connections are kept.
 - Durable, versioned `.vayu` checkpoints with block hashes and verified resumption after
   interruptions, crashes, or restarts.
 - Recovery through replacement URLs with `--resume-from`, verification of saved data against
@@ -45,8 +38,9 @@ First stable release.
 - Prebuilt binary archives for macOS on Apple Silicon and Intel, and Linux on x86-64 and
   ARM64, including static musl and glibc builds.
 - Installation through GitHub Releases using `install.sh` or binary archives, with
-  `SHA256SUMS` and build provenance attestations. The installer verifies checksums and refuses
-  to replace an unrelated program named `vayu` unless explicitly requested.
+  `SHA256SUMS` and build provenance attestations. The installer verifies checksums, tests the
+  binary before replacing anything, refuses to replace an unrelated program named `vayu`
+  unless explicitly requested, and explains failures in detail (more with `--verbose`).
 - Shared CI and release checks covering all supported targets, recovery, terminal behavior,
   binary packaging, and installation.
 
