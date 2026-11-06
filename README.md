@@ -25,7 +25,7 @@ Rerun the installer to update.
 You can also download a binary archive from [GitHub Releases](https://github.com/majiidd/vayu/releases/latest),
 extract it, and put `vayu` in a directory on your `PATH`. Choose macOS or Linux for your
 architecture; the static musl build is recommended on Linux. See
-[supported platforms](docs/COMPATIBILITY.md#platforms) and [download verification](SECURITY.md#verifying-downloads).
+[supported platforms](docs/COMPATIBILITY.md#platforms) and [download verification](docs/RELEASING.md#publish).
 
 On macOS, if a browser-downloaded binary is blocked, clear its quarantine flag after
 verification: `xattr -d com.apple.quarantine /path/to/vayu`.
@@ -64,19 +64,36 @@ vayu "https://example.com/new-link" --resume-from file.zip.vayu
 To discard saved progress and start over, add `--restart`. If the server cannot safely resume
 a download, Vayu keeps your saved data and explains the next step.
 
-## Useful options
+## All options
 
 | Option | Use |
 | --- | --- |
-| `--limit-rate 2M` | Limit total download speed to 2 MiB/s |
-| `--max-connections 4` | Use at most four connections; `1` uses a single stream |
-| `--proxy socks5h://127.0.0.1:1080` | Download through a proxy |
-| `--header-file headers.txt` | Read request headers from a file |
-| `--cookie-file cookies.txt` | Use cookies in Netscape format |
+| `-o, --output PATH` | Save to a file or an existing directory |
+| `--min-connections N` | Minimum connections for segmented downloads: `1`–`64`, default `1` |
+| `--max-connections N` | Maximum simultaneous connections: `1`–`64`, default `15` or the minimum if higher |
+| `--proxy URL` | Use an HTTP, HTTPS, SOCKS5, or SOCKS5H proxy |
+| `--no-proxy` | Bypass configured, environment, and system proxies |
+| `-H, --header NAME:VALUE` | Add a request header; repeat for multiple headers |
+| `--header-file PATH` | Read `Name: value` headers from a file; repeat for multiple files |
+| `--cookie-file PATH` | Import cookies in Netscape/Mozilla format |
+| `--ca-cert PATH` | Trust additional PEM certificates; repeat for multiple files |
 | `--checksum sha256:HEX` | Verify the file against an expected SHA-256 digest |
-| `--ui off` | Use plain progress output |
+| `--restart` | Discard an incomplete download of the same destination and start over |
+| `--resume-from PATH` | Continue a saved download, including with a fresh URL |
+| `--retry MODE` | Retry policy: `auto`, `forever`, or a consecutive failure count; default `auto` |
+| `--connect-timeout DURATION` | Connection setup timeout, such as `30s`; default `30s` |
+| `--stall-timeout DURATION` | Stop a connection after this long without data; default `60s` |
+| `--limit-rate RATE` | Limit total bytes per second, such as `500K` or `2M` |
+| `--http-version VERSION` | HTTP protocol: `auto`, `1.1`, or `2` |
+| `--ui MODE` | Progress display: `auto`, `compact`, `detailed`, or `off` |
+| `--color WHEN` | Color output: `auto`, `always`, or `never` |
+| `--theme THEME` | Color palette: `auto`, `dark`, or `light` |
+| `--glyphs SET` | Progress symbols: `auto`, `unicode`, or `ascii` |
+| `--no-animation` | Disable spinners and animated decoration |
+| `-q, --quiet` | Show only actionable failures |
 | `--json` | Output JSON Lines for scripts |
-| `--quiet` | Show only errors |
+| `-h, --help` | Print help |
+| `-V, --version` | Print the version |
 
 For example:
 
@@ -84,7 +101,7 @@ For example:
 vayu "https://example.com/file.zip" -o ~/Downloads/ --limit-rate 2M
 ```
 
-Run `vayu --help` for all options.
+Run `vayu --help` for command-line help.
 
 ## Over SSH
 
@@ -94,14 +111,6 @@ you disconnect, or start it with `nohup`:
 ```sh
 nohup vayu "https://example.com/file.zip" --ui off > vayu.log 2>&1 < /dev/null &
 ```
-
-## Help and privacy
-
-[Report a problem](https://github.com/majiidd/vayu/issues) with your command, OS, and
-`vayu --version` output. Remove private URLs, tokens, and cookies first.
-
-Vayu has no telemetry or update checks. For private vulnerability reports, see
-[SECURITY.md](SECURITY.md).
 
 ## For developers
 

@@ -19,7 +19,7 @@ and no credentials. It records:
 - a hash of the request;
 - sizes, server validators, and block hashes.
 
-Security problems should not be reported in public issues; see [SECURITY.md](SECURITY.md).
+Report security problems privately through the repository's Security tab.
 
 ## Development setup
 
