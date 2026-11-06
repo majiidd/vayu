@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["download", "http", "cli", "resume", "proxy"]
 categories = ["command-line-utilities", "network-programming"]
 # The crate holds what `cargo install` and the tests need; release tooling stays in the repository.
-include = ["/src/**", "/tests/**", "/docs/*.md", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+include = ["/src/**", "/tests/**", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [[bin]]
 name = "vayu"

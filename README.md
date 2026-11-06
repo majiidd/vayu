@@ -24,8 +24,7 @@ Rerun the installer to update.
 
 You can also download a binary archive from [GitHub Releases](https://github.com/majiidd/vayu/releases/latest),
 extract it, and put `vayu` in a directory on your `PATH`. Choose macOS or Linux for your
-architecture; the static musl build is recommended on Linux. See
-[supported platforms](docs/COMPATIBILITY.md#platforms) and [download verification](docs/RELEASING.md#publish).
+architecture; the static musl build is recommended on Linux.
 
 On macOS, if a browser-downloaded binary is blocked, clear its quarantine flag after
 verification: `xattr -d com.apple.quarantine /path/to/vayu`.
@@ -63,6 +62,20 @@ vayu "https://example.com/new-link" --resume-from file.zip.vayu
 
 To discard saved progress and start over, add `--restart`. If the server cannot safely resume
 a download, Vayu keeps your saved data and explains the next step.
+
+## How it works
+
+Vayu starts with one connection. For larger files, when the server allows it safely, Vayu
+downloads different parts at the same time. It tries doubling the number of connections
+while speed improves, then makes smaller increases as gains shrink. It keeps extra
+connections only when they help and backs off when the server is overloaded or connections fail.
+
+If the connection drops, Vayu waits and retries. It regularly saves progress so an interrupted
+download can continue later. Before resuming, it checks the saved parts for damage and makes
+sure new data can safely be combined with them.
+
+Once the download is complete, Vayu checks any checksum you supplied and puts the file in its
+final location without overwriting an existing file.
 
 ## All options
 
@@ -126,8 +139,7 @@ make ci       # formatting, Clippy, unit and integration tests, release script c
 Use `make` to list tasks, or `cargo install --path . --locked` to install your local build.
 CI also checks dependencies, builds all six release targets, and tests packaged installers.
 
-See [contributing](CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), and
-[releasing](docs/RELEASING.md) for details.
+See [contributing](CONTRIBUTING.md) for details.
 
 ## License
 
