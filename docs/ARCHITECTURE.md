@@ -184,14 +184,24 @@ retry budget. `--limit-rate` is one limiter shared by all connections.
 
 **Controller** (`scheduler::controller`). A pure state machine over time and the plan's byte
 count, unit-tested against simulated links (per-connection limits, a shared limit, saturation,
-high latency). It starts at `--min-connections` (one by default) and adds one after a 1 s
-warm-up and a 1.5 s baseline. It judges the new connection once it has delivered its first byte, ramped up for
-max(0.5 s, 3 × TTFB), and been measured for max(1.5 s, 6 × TTFB). It keeps the connection only
-when combined throughput rose by at least 10%. Otherwise it retires the connection and holds
-growth for a cooldown that starts at 15 s and doubles, up to 2 min, after each fruitless probe.
-It does not grow when less than max(2 s, 8 × TTFB) of transfer remains at the current rate, or
-while the writer's queue is nearly full. A level whose throughput stays 20% below what one
-connection fewer achieved, over 8 s, is abandoned. None of these throughput decisions go below
+diminishing returns, high latency, measurement noise). It starts at `--min-connections` (one by
+default) and probes after a 1 s warm-up and a baseline of one to two measurement windows
+(max(1.5 s, 6 × TTFB) each). Like TCP slow start, the first probes double the count (1, 2, 4, 8,
+then the maximum), started together. A probe is judged once every added connection has
+delivered its first byte and ramped up for max(0.5 s, 3 × TTFB). It is rejected if one window
+does not show enough gain; otherwise a second window, twice as long, decides. Doubling continues
+while the added connections carry at least 60% of an average existing connection's throughput.
+When a doubling helps less, the two measurements are fitted to equal per-connection rates up to
+a shared capacity: the count drops to the fewest connections that reach it, and later probes add
+one connection at a time. A connection added singly is kept when throughput rose by 10%, or by
+half an average connection's share when that is smaller, but at least 5%; a fixed 10% would stop
+growth near ten connections even when each one adds as much as the others. A rejected probe
+retires its connections and holds growth for a cooldown that starts at 15 s and doubles, up to
+2 min, after each fruitless probe. A probing connection that finds no work ends the probe's wait
+for it instead of stalling the probe. The controller does not grow when less than
+max(2 s, 8 × TTFB) of transfer remains at the current rate, or while the writer's queue is nearly
+full. A level whose throughput stays 20% below what a smaller measured level achieved, over 8 s,
+falls back to that level. Throttling and failures end doubling. None of these throughput decisions go below
 `--min-connections`. Throttling and failures may, since the server asked for fewer; once the
 cooldown passes, the controller returns to the minimum directly, without a probe.
 

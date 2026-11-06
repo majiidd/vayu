@@ -7,6 +7,15 @@ and release versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Parallel connections grow faster and further: probes double the connection count
+  while each new connection adds about as much as the others, then settle where the
+  link saturates. A single added connection no longer needs a fixed 10% gain, so
+  servers that limit each connection can use the full `--max-connections`.
+- Gains are confirmed over a second measurement window before connections are kept,
+  so measurement noise adds fewer useless connections.
+
 ## [1.0.0] - 2026-11-06
 
 First stable release.

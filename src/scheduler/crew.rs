@@ -284,11 +284,14 @@ async fn supervise(
                 let running = lanes.iter().filter(|l| l.is_some()).count();
                 let active = 1 + running;
                 if usize::from(target) > active && has_work {
-                    if let Some(slot) = lanes.iter().position(Option::is_none) {
+                    // A probe may add several connections; start them together so they are
+                    // measured over the same window.
+                    let probe = controller.probing();
+                    for _ in active..usize::from(target) {
+                        let Some(slot) = lanes.iter().position(Option::is_none) else { break };
                         let retire = Arc::new(AtomicBool::new(false));
                         lanes[slot] = Some(Lane { retire: retire.clone() });
                         let lane = slot + 1;
-                        let probe = controller.probing();
                         let task = helper(
                             ctx.clone(),
                             shared.clone(),
@@ -377,7 +380,7 @@ async fn helper(
                 Some(claim) => (Work::Owned(claim), total),
                 None => match plan.propose(now, steal_horizon(setup)) {
                     Some(steal) => (Work::Steal(steal), total),
-                    None => return HelperEnd::Idle,
+                    None => return idle(&shared, probe && !connected),
                 },
             }
         };
@@ -442,7 +445,7 @@ async fn helper(
                         // The owner got there first; this response is not needed.
                         lost_splits += 1;
                         if lost_splits >= MAX_LOST_SPLITS {
-                            return HelperEnd::Idle;
+                            return idle(&shared, probe && !connected);
                         }
                         continue;
                     }
@@ -464,6 +467,15 @@ async fn helper(
             Received::Ended(end) => return end,
         }
     }
+}
+
+/// A helper found no work. A probing helper that never delivered a byte tells the controller,
+/// so the probe is judged on the connections that did start instead of waiting for them.
+fn idle(shared: &Shared, unused_probe: bool) -> HelperEnd {
+    if unused_probe {
+        let _ = shared.notes.send(Note::Signal(Signal::Unused));
+    }
+    HelperEnd::Idle
 }
 
 /// Validate a response to a helper's range request for `[start, ..)` of `total` bytes.
