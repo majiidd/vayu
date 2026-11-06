@@ -87,6 +87,7 @@ vayu "https://example.com/new-signed-url" --resume-from file.zip.vayu
 | --- | --- |
 | `-o, --output PATH` | Destination file, or an existing directory (or a path ending in `/`) to save into |
 | `--max-connections N` | Upper bound on simultaneous connections (1–64, default 8). Vayu adds connections up to this bound only while they help; `1` downloads over a single stream |
+| `--min-connections N` | Lower bound on simultaneous connections once a download is segmented (1–64, default 1). Vayu starts with this many and keeps them even when measurement says more do not help. Above `--max-connections` it is an error on the command line; a configured value is lowered to the maximum |
 | `--proxy URL` | `http://`, `https://`, `socks5://` (local DNS) or `socks5h://` (DNS at the proxy); credentials go in the URL |
 | `--no-proxy` | Ignore proxy environment variables and system proxy settings |
 | `-H, --header NAME:VALUE` | Extra request header (repeatable) |
@@ -159,6 +160,12 @@ again, longer after each attempt that did not help. Measurement windows grow wit
 server's response time, so high-latency links are judged on longer samples. More connections
 are not added when less than about two seconds of transfer (or eight round trips) remain, or
 when the disk cannot keep up.
+
+`--min-connections N` sets a floor for these decisions: a segmented download starts with N
+connections and never drops below N because extra connections did not raise throughput. It
+still grows past N while connections help. The floor applies only to downloads that can be
+segmented (above); others stay on one stream. Server limits (below) may still take it under N;
+after the cooldown it returns to N directly.
 
 - **Server limits.** HTTP 429 or 503 on an extra connection halves the connection count. A
   network failure, stall, or early close removes one connection. If the server ignores ranges
@@ -332,6 +339,7 @@ macOS. Command-line options take precedence. Unknown keys are errors.
 
 ```toml
 max-connections = 8
+min-connections = 1
 proxy = "socks5h://127.0.0.1:1080"   # or "system" / "none"
 retry = "auto"                        # or "forever", or a number
 connect-timeout = "30s"

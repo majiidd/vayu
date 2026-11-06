@@ -175,14 +175,16 @@ retry budget. `--limit-rate` is one limiter shared by all connections.
 
 **Controller** (`scheduler::controller`). A pure state machine over time and the plan's byte
 count, unit-tested against simulated links (per-connection limits, a shared limit, saturation,
-high latency). It starts at one connection and adds one after a 1 s warm-up and a 1.5 s
-baseline. It judges the new connection once it has delivered its first byte, ramped up for
+high latency). It starts at `--min-connections` (one by default) and adds one after a 1 s
+warm-up and a 1.5 s baseline. It judges the new connection once it has delivered its first byte, ramped up for
 max(0.5 s, 3 × TTFB), and been measured for max(1.5 s, 6 × TTFB). It keeps the connection only
 when combined throughput rose by at least 10%. Otherwise it retires the connection and holds
 growth for a cooldown that starts at 15 s and doubles, up to 2 min, after each fruitless probe.
 It does not grow when less than max(2 s, 8 × TTFB) of transfer remains at the current rate, or
 while the writer's queue is nearly full. A level whose throughput stays 20% below what one
-connection fewer achieved, over 8 s, is abandoned.
+connection fewer achieved, over 8 s, is abandoned. None of these throughput decisions go below
+`--min-connections`. Throttling and failures may, since the server asked for fewer; once the
+cooldown passes, the controller returns to the minimum directly, without a probe.
 
 **Connection topology.** `Transport` builds one reqwest client per slot. They share the
 cookie jar and the certificate roots loaded at startup. Each client keeps at most one idle

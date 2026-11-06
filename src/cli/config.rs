@@ -16,6 +16,7 @@ use crate::error::{Failure, describe_io};
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
+    pub min_connections: Option<u16>,
     pub max_connections: Option<u16>,
     /// A proxy URL, or `system` / `none`.
     pub proxy: Option<String>,
@@ -115,6 +116,7 @@ mod tests {
     fn parses_full_config() {
         let config = parse(
             r#"
+            min-connections = 2
             max-connections = 4
             proxy = "socks5h://127.0.0.1:1080"
             retry = "forever"
@@ -132,6 +134,7 @@ mod tests {
             Path::new("test.toml"),
         )
         .unwrap();
+        assert_eq!(config.min_connections, Some(2));
         assert_eq!(config.max_connections, Some(4));
         assert_eq!(config.retry, Some(RetryMode::Forever));
         assert_eq!(config.stall_timeout, Some(Duration::from_secs(120)));

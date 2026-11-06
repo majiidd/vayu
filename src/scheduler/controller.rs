@@ -1,7 +1,8 @@
 //! Adaptive concurrency: how many connections a segmented transfer should use.
 //!
 //! Hill climbing on measured useful throughput (bytes accepted for the file, so retransmitted or
-//! discarded bytes never count). The transfer starts with one connection. After a warm-up, and
+//! discarded bytes never count). The transfer starts with the minimum number of connections, one
+//! unless configured otherwise. After a warm-up, and
 //! only while enough work remains to repay a connection's setup, the controller adds one
 //! connection and waits for it to ramp up: the wait scales with the observed time to first byte,
 //! so high-latency links get longer windows. The connection stays only when aggregate throughput
@@ -12,6 +13,10 @@
 //! connections remove one, and a server that does not serve ranges to extra connections ends
 //! segmentation. A disk that cannot keep up stops growth, since more connections cannot help. A
 //! level whose throughput falls well below what one connection fewer achieved is abandoned.
+//!
+//! Decisions based on throughput never go below the minimum. Throttling and failures may, since
+//! the server asked for fewer connections; after [`COOLDOWN`], the count returns to the minimum
+//! without a probe.
 //!
 //! The controller is a pure state machine over time and byte counts; the supervisor feeds it and
 //! applies its target.
@@ -83,11 +88,14 @@ enum State {
 }
 
 pub struct Controller {
+    min: u16,
     max: u16,
     target: u16,
     state: State,
     /// No growth before this time.
     hold: Option<Instant>,
+    /// No return to the minimum before this time.
+    restore: Option<Instant>,
     cooldown: Duration,
     /// Smoothed time to first byte.
     setup: Option<Duration>,
@@ -97,18 +105,23 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(max: u16, now: Instant) -> Controller {
+    /// `min` is clamped to `1..=max`.
+    pub fn new(min: u16, max: u16, now: Instant) -> Controller {
+        let max = max.max(1);
+        let min = min.clamp(1, max);
         Controller {
-            max: max.max(1),
-            target: 1,
+            min,
+            max,
+            target: min,
             state: State::Settling {
                 until: now + WARMUP,
             },
             hold: None,
+            restore: None,
             cooldown: COOLDOWN,
             setup: None,
             samples: VecDeque::new(),
-            levels: vec![None; usize::from(max.max(1)) + 1],
+            levels: vec![None; usize::from(max) + 1],
         }
     }
 
@@ -137,10 +150,11 @@ impl Controller {
             Signal::Latency(ttfb) => self.note_latency(ttfb),
             Signal::Throttled => {
                 let cut = (self.target / 2).max(1);
-                self.back_off(now, cut);
+                self.back_off(now, cut, 1);
             }
-            Signal::Failed => self.back_off(now, 1),
+            Signal::Failed => self.back_off(now, 1, 1),
             Signal::Unsupported => {
+                self.min = 1;
                 self.max = 1;
                 self.target = 1;
                 self.state = State::Steady { since: now };
@@ -165,8 +179,13 @@ impl Controller {
                 }
             }
             State::Steady { since } => {
-                if self.worse_than_one_fewer(now, since) {
-                    self.back_off(now, 1);
+                if self.target < self.min && self.restore.is_none_or(|r| now >= r) {
+                    self.target = self.min;
+                    self.state = State::Settling {
+                        until: now + self.ramp(),
+                    };
+                } else if self.worse_than_one_fewer(now, since) {
+                    self.back_off(now, 1, self.min);
                 } else if self.may_grow(&obs, since)
                     && let Some(baseline) = self.rate(now, self.measure())
                 {
@@ -185,7 +204,7 @@ impl Controller {
                 connected,
             } => match connected {
                 None if now.duration_since(launched) > self.probe_timeout() => {
-                    self.back_off(now, 1);
+                    self.back_off(now, 1, self.min);
                 }
                 None => {}
                 Some(at) if now >= at + self.ramp() + self.measure() => {
@@ -198,7 +217,7 @@ impl Controller {
                             since: now - self.measure(),
                         };
                     } else {
-                        self.back_off(now, 1);
+                        self.back_off(now, 1, self.min);
                     }
                 }
                 Some(_) => {}
@@ -209,7 +228,8 @@ impl Controller {
 
     fn may_grow(&self, obs: &Observation, since: Instant) -> bool {
         let now = obs.now;
-        if self.target >= self.max
+        if self.target < self.min
+            || self.target >= self.max
             || !obs.has_work
             || obs.disk_busy
             || self.hold.is_some_and(|h| now < h)
@@ -226,7 +246,7 @@ impl Controller {
 
     /// Throughput at this level has fallen well below what one connection fewer achieved.
     fn worse_than_one_fewer(&self, now: Instant, since: Instant) -> bool {
-        if self.target < 2 || now.duration_since(since) < WORSE_WINDOW {
+        if self.target <= self.min || now.duration_since(since) < WORSE_WINDOW {
             return false;
         }
         let Some(fewer) = self.levels[usize::from(self.target - 1)] else {
@@ -236,10 +256,13 @@ impl Controller {
             .is_some_and(|rate| rate < fewer * WORSE_FACTOR)
     }
 
-    /// Remove `by` connections and wait before trying more.
-    fn back_off(&mut self, now: Instant, by: u16) {
-        self.target = self.target.saturating_sub(by).max(1);
+    /// Remove `by` connections, keeping at least `floor`, and wait before trying more.
+    fn back_off(&mut self, now: Instant, by: u16, floor: u16) {
+        self.target = self.target.saturating_sub(by).max(floor).max(1);
         self.hold = Some(now + self.cooldown);
+        // Fixed, unlike the growth cooldown: probes that did not help say nothing about how soon
+        // the server takes the minimum again.
+        self.restore = Some(now + COOLDOWN);
         self.cooldown = (self.cooldown * 2).min(MAX_COOLDOWN);
         self.state = State::Settling {
             until: now + self.ramp(),
@@ -297,9 +320,9 @@ mod tests {
     }
 
     /// Run the controller against `world` for `secs`; returns the connection count over time.
-    fn simulate(world: &World, max: u16, secs: u64) -> Vec<u16> {
+    fn simulate(world: &World, min: u16, max: u16, secs: u64) -> Vec<u16> {
         let t0 = Instant::now();
-        let mut c = Controller::new(max, t0);
+        let mut c = Controller::new(min, max, t0);
         let mut active = 1u16;
         let mut pending: Option<Instant> = None;
         let mut bytes = 0.0;
@@ -342,7 +365,7 @@ mod tests {
             ttfb: Duration::from_millis(100),
             size: BIG,
         };
-        let trace = simulate(&world, 8, 60);
+        let trace = simulate(&world, 1, 8, 60);
         assert_eq!(*trace.last().unwrap(), 8, "{trace:?}");
         assert!(trace.windows(2).all(|w| w[1] <= w[0] + 1), "one at a time");
     }
@@ -354,7 +377,7 @@ mod tests {
             ttfb: Duration::from_millis(100),
             size: BIG,
         };
-        let trace = simulate(&world, 8, 120);
+        let trace = simulate(&world, 1, 8, 120);
         assert!(trace.iter().all(|&k| k <= 2), "{trace:?}");
         let ones = trace.iter().filter(|&&k| k == 1).count();
         assert!(
@@ -370,7 +393,7 @@ mod tests {
             ttfb: Duration::from_millis(50),
             size: BIG,
         };
-        let trace = simulate(&world, 8, 120);
+        let trace = simulate(&world, 1, 8, 120);
         assert!(trace.iter().all(|&k| k <= 4), "{trace:?}");
         assert!(
             trace[trace.len() / 2..].iter().all(|&k| k >= 3),
@@ -385,7 +408,7 @@ mod tests {
             ttfb: Duration::from_millis(1500),
             size: BIG,
         };
-        let trace = simulate(&world, 4, 180);
+        let trace = simulate(&world, 1, 4, 180);
         assert_eq!(*trace.last().unwrap(), 4, "{trace:?}");
         let first_growth = trace.iter().position(|&k| k > 1).unwrap();
         assert!(first_growth as u32 * TICK.as_millis() as u32 >= 1000);
@@ -398,12 +421,12 @@ mod tests {
             ttfb: Duration::from_millis(10),
             size: 1_500_000,
         };
-        assert!(simulate(&world, 8, 10).iter().all(|&k| k == 1));
+        assert!(simulate(&world, 1, 8, 10).iter().all(|&k| k == 1));
     }
 
     fn steady(max: u16) -> (Controller, Instant, u64) {
         let t0 = Instant::now();
-        let mut c = Controller::new(max, t0);
+        let mut c = Controller::new(1, max, t0);
         let mut now = t0;
         let mut bytes = 0;
         while !c.probing() {
@@ -455,7 +478,7 @@ mod tests {
     fn a_busy_disk_or_no_work_prevents_growth() {
         for (has_work, disk_busy) in [(false, false), (true, true)] {
             let t0 = Instant::now();
-            let mut c = Controller::new(8, t0);
+            let mut c = Controller::new(1, 8, t0);
             for i in 1..100u64 {
                 c.tick(Observation {
                     now: t0 + TICK * i as u32,
@@ -467,5 +490,126 @@ mod tests {
             }
             assert_eq!(c.target(), 1);
         }
+    }
+
+    #[test]
+    fn the_minimum_holds_when_more_connections_do_not_help() {
+        let world = World {
+            rate: |_| 500_000.0,
+            ttfb: Duration::from_millis(100),
+            size: BIG,
+        };
+        let trace = simulate(&world, 3, 8, 120);
+        let reached = trace.iter().position(|&k| k == 3).unwrap();
+        assert!(reached <= 8, "starts at the minimum: {trace:?}");
+        assert!(trace[reached..].iter().all(|&k| k >= 3), "{trace:?}");
+        assert!(trace.iter().all(|&k| k <= 4), "{trace:?}");
+    }
+
+    #[test]
+    fn the_minimum_still_grows_when_connections_help() {
+        let world = World {
+            rate: |k| f64::from(k) * 100_000.0,
+            ttfb: Duration::from_millis(100),
+            size: BIG,
+        };
+        let trace = simulate(&world, 3, 8, 60);
+        assert_eq!(*trace.last().unwrap(), 8, "{trace:?}");
+    }
+
+    #[test]
+    fn the_minimum_is_clamped_to_the_maximum() {
+        let c = Controller::new(10, 4, Instant::now());
+        assert_eq!((c.min, c.target()), (4, 4));
+        let c = Controller::new(0, 4, Instant::now());
+        assert_eq!((c.min, c.target()), (1, 1));
+    }
+
+    #[test]
+    fn throttling_goes_below_the_minimum_until_the_cooldown_passes() {
+        let t0 = Instant::now();
+        let mut c = Controller::new(4, 8, t0);
+        let tick = |c: &mut Controller, now: Instant| {
+            c.tick(Observation {
+                now,
+                bytes: 0,
+                remaining: BIG,
+                has_work: true,
+                disk_busy: false,
+            })
+        };
+        c.signal(t0, Signal::Throttled);
+        assert_eq!(c.target(), 2);
+        c.signal(t0, Signal::Throttled);
+        assert_eq!(c.target(), 1);
+        let restore = c.restore.unwrap();
+        let mut now = t0;
+        while now + TICK < restore {
+            now += TICK;
+            assert!(tick(&mut c, now) < 4, "held below the minimum");
+        }
+        now = restore + TICK;
+        tick(&mut c, now);
+        assert_eq!(tick(&mut c, now + TICK), 4, "restored without a probe");
+        assert!(!c.probing());
+    }
+
+    #[test]
+    fn a_long_growth_cooldown_does_not_delay_the_minimum() {
+        let t0 = Instant::now();
+        let mut c = Controller::new(3, 8, t0);
+        let mut now = t0;
+        let mut bytes = 0;
+        // A shared limit: every probe above the minimum fails and doubles the cooldown.
+        while c.cooldown < MAX_COOLDOWN {
+            now += TICK;
+            bytes += 125_000;
+            if c.probing() {
+                c.signal(now, Signal::Connected(Duration::from_millis(50)));
+            }
+            c.tick(Observation {
+                now,
+                bytes,
+                remaining: BIG,
+                has_work: true,
+                disk_busy: false,
+            });
+            assert!(now < t0 + Duration::from_secs(600), "probes keep failing");
+        }
+        assert_eq!(c.target(), 3);
+        c.signal(now, Signal::Failed);
+        assert_eq!(c.target(), 2);
+        let failed = now;
+        while c.target() < 3 {
+            now += TICK;
+            bytes += 125_000;
+            c.tick(Observation {
+                now,
+                bytes,
+                remaining: BIG,
+                has_work: true,
+                disk_busy: false,
+            });
+        }
+        assert!(now - failed <= COOLDOWN + TICK * 2, "{:?}", now - failed);
+        assert!(c.hold.unwrap() > now, "growth stays on hold");
+    }
+
+    #[test]
+    fn unsupported_overrides_the_minimum() {
+        let t0 = Instant::now();
+        let mut c = Controller::new(4, 8, t0);
+        c.signal(t0, Signal::Unsupported);
+        assert_eq!((c.target(), c.min, c.max), (1, 1, 1));
+        for i in 1..100u32 {
+            c.tick(Observation {
+                now: t0 + TICK * i,
+                bytes: u64::from(i) * 100_000,
+                remaining: BIG,
+                has_work: true,
+                disk_busy: false,
+            });
+        }
+        assert_eq!(c.target(), 1);
     }
 }

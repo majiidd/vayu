@@ -47,6 +47,10 @@ pub struct Args {
     #[arg(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
+    /// Lower bound on simultaneous connections when the download is segmented [default: 1]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
+    pub min_connections: Option<u16>,
+
     /// Upper bound on simultaneous connections [default: 8]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
     pub max_connections: Option<u16>,
@@ -210,6 +214,8 @@ pub struct Display {
 pub struct Settings {
     pub url: Url,
     pub output: Option<PathBuf>,
+    /// Connections kept even when more do not raise throughput, once the transfer is segmented.
+    pub min_connections: u16,
     pub max_connections: u16,
     pub proxy: ProxySetting,
     pub headers: Vec<UserHeader>,
@@ -228,6 +234,7 @@ pub struct Settings {
     pub display: Display,
 }
 
+pub const DEFAULT_MIN_CONNECTIONS: u16 = 1;
 pub const DEFAULT_MAX_CONNECTIONS: u16 = 8;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -274,6 +281,21 @@ impl Settings {
         if !(1..=64).contains(&max_connections) {
             return Err(Failure::usage("max_connections must be between 1 and 64"));
         }
+        let min_connections = args
+            .min_connections
+            .or(config.min_connections)
+            .unwrap_or(DEFAULT_MIN_CONNECTIONS);
+        if !(1..=64).contains(&min_connections) {
+            return Err(Failure::usage("min_connections must be between 1 and 64"));
+        }
+        // A configured minimum yields to a lower maximum, e.g. `--max-connections 1`.
+        if args.min_connections.is_some() && min_connections > max_connections {
+            return Err(Failure::usage(format!(
+                "--min-connections {min_connections} is above max_connections ({max_connections})"
+            ))
+            .with_hint("raise --max-connections or lower --min-connections"));
+        }
+        let min_connections = min_connections.min(max_connections);
 
         let checkpoint_interval = config
             .checkpoint_interval
@@ -293,6 +315,7 @@ impl Settings {
         Ok(Settings {
             url,
             output: args.output,
+            min_connections,
             max_connections,
             proxy,
             headers: user_headers,
@@ -383,6 +406,8 @@ mod tests {
         let args = Args::try_parse_from([
             "vayu",
             "https://example.com/file.zip",
+            "--min-connections",
+            "2",
             "--max-connections",
             "8",
             "--proxy",
@@ -397,11 +422,13 @@ mod tests {
             "forever",
         ])
         .unwrap();
+        assert_eq!(args.min_connections, Some(2));
         assert_eq!(args.max_connections, Some(8));
         assert_eq!(args.ui, Some(UiMode::Compact));
         assert_eq!(args.http_version, Some(HttpVersion::Http11));
         assert_eq!(args.retry, Some(RetryMode::Forever));
         assert!(Args::try_parse_from(["vayu", "u", "--max-connections", "0"]).is_err());
+        assert!(Args::try_parse_from(["vayu", "u", "--min-connections", "65"]).is_err());
         assert!(Args::try_parse_from(["vayu", "u", "--proxy", "x", "--no-proxy"]).is_err());
         assert!(
             Args::try_parse_from(["vayu", "u", "--restart", "--resume-from", "f.vayu"]).is_err()

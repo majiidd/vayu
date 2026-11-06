@@ -8,8 +8,8 @@
 //!
 //! When the size is known, continuity can be proven, the bytes are not re-encoded, and enough
 //! work remains (or saved progress has gaps), the transfer is segmented: a [`Plan`] tracks which
-//! ranges are missing, the lead works through them, and the [`Crew`] adds connections while the
-//! controller finds them useful. Otherwise, and always with `--max-connections 1` unless saved
+//! ranges are missing, the lead works through them, and the [`Crew`] keeps `--min-connections`
+//! and adds more while the controller finds them useful. Otherwise, and always with `--max-connections 1` unless saved
 //! progress has gaps, the lead streams the file alone from start to end.
 //!
 //! Progress saved by an earlier run is never discarded automatically: when it cannot be
@@ -332,6 +332,7 @@ impl<'a> Engine<'a> {
             writes: writer.handle(),
             validators: resource.validators.clone(),
             limiter: self.limiter.clone(),
+            min_connections: self.settings.min_connections,
             max_connections: self.settings.max_connections,
         });
         let crew = Crew::start(plan, context);

@@ -126,6 +126,54 @@ fn max_connections_one_keeps_a_single_stream() {
 }
 
 #[test]
+fn max_connections_one_overrides_a_configured_minimum() {
+    let _serial = serial();
+    let body = payload(6 * MIB);
+    let server = per_connection(&body, 4 * MIB as u64);
+    let dir = tempdir();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "min-connections = 4\n").unwrap();
+
+    let out = vayu_env(
+        dir.path(),
+        &[&server.url("/one.bin"), "--max-connections", "1"],
+        &[("VAYU_CONFIG", config.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.path().join("one.bin")).unwrap(), body);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+}
+
+#[test]
+fn min_connections_are_kept_when_more_do_not_help() {
+    let _serial = serial();
+    let body = payload(12 * MIB);
+    let served = body.clone();
+    // One budget for all connections: extra connections never raise throughput.
+    let budget = SharedRate::new(4 * MIB as u64);
+    let server = Server::start(move |req| {
+        Reply::ranged(&served, req)
+            .header("ETag", ETAG)
+            .header("Accept-Ranges", "bytes")
+            .shared(&budget)
+    });
+    let dir = tempdir();
+
+    let out = run(
+        dir.path(),
+        &[&server.url("/min.bin"), "--min-connections", "3"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.path().join("min.bin")).unwrap(), body);
+    assert!(
+        server.peak_concurrency() >= 3,
+        "{}",
+        server.peak_concurrency()
+    );
+}
+
+#[test]
 fn a_server_that_ignores_ranges_is_served_by_one_stream() {
     let _serial = serial();
     let body = payload(12 * MIB);

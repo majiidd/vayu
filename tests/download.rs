@@ -400,6 +400,13 @@ fn invalid_arguments_exit_2() {
         &["https://example.com/f", "--max-connections", "0"],
         &[
             "https://example.com/f",
+            "--min-connections",
+            "5",
+            "--max-connections",
+            "2",
+        ],
+        &[
+            "https://example.com/f",
             "--proxy",
             "socks4://127.0.0.1:1080",
         ],

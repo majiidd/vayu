@@ -56,6 +56,8 @@ pub struct Context {
     /// The representation the transfer is bound to.
     pub validators: Validators,
     pub limiter: Option<Arc<Limiter>>,
+    /// Connections kept in total, the lead included.
+    pub min_connections: u16,
     /// Connections in total, the lead included.
     pub max_connections: u16,
 }
@@ -204,7 +206,7 @@ async fn supervise(
     mut cancelled: watch::Receiver<bool>,
 ) {
     let max = ctx.max_connections;
-    let mut controller = Controller::new(max, Instant::now());
+    let mut controller = Controller::new(ctx.min_connections, max, Instant::now());
     // Index `i` is connection slot `i + 1`; slot 0 is the lead's.
     let mut lanes: Vec<Option<Lane>> = (1..max).map(|_| None).collect();
     let mut helpers: JoinSet<(usize, HelperEnd)> = JoinSet::new();

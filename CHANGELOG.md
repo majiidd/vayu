@@ -21,10 +21,12 @@ The first public beta. Everything below is new.
   - SHA-256 verification with `--checksum`.
 - Retries with exponential backoff and `Retry-After`, stall detection (`--stall-timeout`), and
   a retry policy (`--retry auto`, `forever`, or a count of consecutive failures).
-- Adaptive parallel connections (`--max-connections`, default 8):
+- Adaptive parallel connections (`--max-connections`, default 8; `--min-connections`, default 1):
   - Every download starts on one connection.
   - Connections are added only while measurement shows they raise throughput, and removed when
     the server throttles them.
+  - `--min-connections` keeps a floor of connections on segmented downloads even when more do
+    not raise throughput; throttling may go below it until the cooldown passes.
   - Every partial response is validated against the source's identity.
   - Vayu falls back to one connection when a server does not support ranges safely.
 - A shared `--limit-rate` across all connections.
