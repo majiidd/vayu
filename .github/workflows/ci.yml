@@ -1,5 +1,9 @@
 name: CI
 
+# Every branch push runs CI. A pull request from this repository already has that push's checks
+# on its head commit, so its pull_request run skips every job (see `if:` below); without that,
+# each push would run everything twice and the duplicate macOS jobs would queue for runners.
+# Pull requests from forks have no push run here and run in full.
 on:
   push:
     branches: ["**"]
@@ -10,27 +14,56 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request or branch cancels the run it supersedes. Release runs
+# (workflow_call from a tag) are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   CARGO_TERM_COLOR: always
+  # Line tables keep test backtraces useful at a fraction of full debug info's build, link,
+  # and cache cost.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  # Formatting and lints do not depend on the platform: check them once.
+  lint:
+    name: lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # rust-toolchain.toml pins the exact tested toolchain.
       - run: make toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: make lint
+
+  test:
+    name: test (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Intel macOS test run is the slowest job by far, so only main, release tags, and
+        # manual runs include it. On other branches the x86_64-apple-darwin package job still
+        # runs the release binary and the installer on Intel.
+        os: ${{ fromJSON((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && '["macos-latest", "macos-15-intel", "ubuntu-latest", "ubuntu-24.04-arm"]' || '["macos-latest", "ubuntu-latest", "ubuntu-24.04-arm"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: make toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       # Keep debug assertions enabled: recovery tests exercise injected crash points.
-      - run: make ci
+      - run: make test test-release
 
   build:
     name: package (${{ matrix.target }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +92,12 @@ jobs:
       - uses: actions/checkout@v7
       - if: endsWith(matrix.target, '-musl')
         run: make musl-deps
+      - run: make toolchain
+      # Dependencies only: cargo rebuilds vayu itself, so release binaries never come from a
+      # cached build of this crate.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - run: make release
       - run: make check-binary
       - name: Smoke test on musl and glibc distributions
@@ -107,6 +146,7 @@ jobs:
 
   audit:
     name: licenses and advisories
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -91,7 +91,7 @@ lint: fmt-check clippy ## Formatting and lints
 deny: ## Licenses and advisories (cargo install cargo-deny)
 	$(CARGO) deny check
 
-ci: lint test test-release ## What every CI test job runs
+ci: lint test test-release ## What CI's lint and test jobs run between them
 
 check: ci deny ## Everything a pull request needs
 

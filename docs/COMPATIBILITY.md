@@ -9,7 +9,7 @@ through [`release.yml`](../.github/workflows/release.yml) before creating a draf
 | Platform | Release archive | Minimum | Verified by |
 |---|---|---|---|
 | macOS, Apple Silicon | `vayu-aarch64-apple-darwin` | macOS 11 | Full test suite on `macos-latest` (CI) |
-| macOS, Intel | `vayu-x86_64-apple-darwin` | macOS 10.14 | Full test suite on `macos-15-intel` (CI) |
+| macOS, Intel | `vayu-x86_64-apple-darwin` | macOS 10.14 | Full test suite on `macos-15-intel` for `main` and releases; release binary and installer on every push (CI) |
 | Linux x86-64, any distribution | `vayu-x86_64-unknown-linux-musl` (static) | Linux 3.2 | Test suite on Ubuntu; binary run on Alpine, Debian oldstable and stable, and Fedora (CI) |
 | Linux ARM64, any distribution | `vayu-aarch64-unknown-linux-musl` (static) | Linux 4.1 | Test suite on Ubuntu ARM64; the same distribution runs (CI) |
 | Linux x86-64, glibc | `vayu-x86_64-unknown-linux-gnu` | glibc of Ubuntu 22.04 or older, printed by the build | Runs on Ubuntu 22.04, Debian stable, and Fedora (CI) |

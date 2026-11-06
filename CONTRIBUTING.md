@@ -37,8 +37,11 @@ make deny                    # licenses and advisories (cargo install cargo-deny
 make check                   # all of the above
 ```
 
-CI runs `make ci` on macOS (ARM64 and Intel) and Linux (x86-64 and ARM64), and cargo-deny on
-Linux. It builds and packages all six release targets, verifies their linkage, runs Linux
+CI runs on every push, once per commit: a pull request from this repository shows its push
+run's checks, and pull requests from forks get their own run. It checks formatting, Clippy, and
+cargo-deny once on Linux, and runs the tests and release script checks on macOS ARM64 and Linux
+(x86-64 and ARM64), plus Intel macOS on `main`, release tags, and manual runs. It caches
+compiled dependencies and cancels a run when a newer push to the same branch supersedes it. It builds and packages all six release targets, verifies their linkage, runs Linux
 distribution smoke tests, and tests the installer on macOS and musl Linux, including BusyBox
 `sh`. It also assembles and verifies the combined release assets. A pull request needs all
 jobs to pass. Version tags reuse this workflow before creating a draft release.
