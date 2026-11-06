@@ -5,7 +5,7 @@
 #
 # musl builds must be static. glibc builds print the newest glibc symbol version they need.
 # macOS builds print their minimum OS version and libraries, and must carry a valid signature
-# (the linker's ad-hoc one is enough). Without TARGET, the host's kind is assumed.
+# on arm64 (the linker's ad-hoc one is enough). Without TARGET, the host's kind is assumed.
 set -eu
 
 bin=${1:?usage: scripts/check-binary.sh BIN [TARGET]}
@@ -28,7 +28,16 @@ case $target in
   *-darwin)
     otool -l "$bin" | grep -A3 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' | grep -E 'minos|version'
     otool -L "$bin"
-    # Apple Silicon requires a signature; the linker's ad-hoc signature permits execution.
-    codesign --verify --verbose "$bin" ;;
+    # Apple Silicon requires a signature, and the linker adds an ad-hoc one to arm64 code. It
+    # does not sign x86_64 code, which runs unsigned on Intel and under Rosetta; a signature
+    # there, if present, must still be valid.
+    case " $(lipo -archs "$bin") " in
+      *" arm64 "*) codesign --verify --verbose "$bin" ;;
+      *) if codesign --display "$bin" 2>/dev/null; then
+           codesign --verify --verbose "$bin"
+         else
+           echo "$bin: unsigned (not required for x86_64)"
+         fi ;;
+    esac ;;
 esac
 "$bin" --version | grep -q '(vayu)'
